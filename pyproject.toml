@@ -8,8 +8,8 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.12"
 plotly = "^5.22.0"
-pandas = "^2.2.2"
 geopandas = "^1.0.0"
+pandas = "^2.2.2"
 
 
 [build-system]

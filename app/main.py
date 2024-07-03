@@ -1,14 +1,14 @@
 import streamlit as st
-import asyncio
 from data_loader import load_data, create_file_watcher
 from map_creator import create_map
 from utils import get_numeric_columns, get_categorical_columns
 import plotly.express as px
 import time
+import threading
 import random
 
 
-async def main():
+def main():
     st.set_page_config(layout="wide", page_title="Dynamic Map Plotter")
 
     st.markdown(
@@ -40,7 +40,6 @@ async def main():
         df = load_data(uploaded_file)
 
         if df is not None and not df.empty:
-            # Initial data preview
             with data_container.container():
                 st.write("Data Preview:")
                 st.write(df.head())
@@ -128,10 +127,10 @@ async def main():
             # Initial map creation
             update_map(df)
 
-            # Create and start file watcher
             file_watcher = create_file_watcher(uploaded_file, update_map)
-            await file_watcher.watch()
+            watcher_thread = threading.Thread(target=file_watcher.watch, daemon=True)
+            watcher_thread.start()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

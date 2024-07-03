@@ -10,6 +10,7 @@ python = "^3.12"
 plotly = "^5.22.0"
 geopandas = "^1.0.0"
 pandas = "^2.2.2"
+openpyxl = "^3.1.5"
 
 
 [build-system]

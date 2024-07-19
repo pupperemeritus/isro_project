@@ -57,38 +57,37 @@ def create_map(
         elif map_type == "Heatmap":
             if bin_heatmap:
                 # Define bin size and range
-                bin_size = 1  # Adjust as needed based on your data distribution
-                lat_range = (df["Latitude"].min() - 5, df["Latitude"].max() + 5)
-                lon_range = (df["Longitude"].min() - 5, df["Longitude"].max() + 5)
+                bin_size = 1
+                lat_range = (0, 40)
+                lon_range = (65, 100)
 
-                # Compute bin edges
                 lat_bins = np.arange(lat_range[0], lat_range[1], bin_size)
                 lon_bins = np.arange(lon_range[0], lon_range[1], bin_size)
 
-                # Compute mean S4 values within each bin
-                mean_s4 = []
+                max_s4 = []
                 for lat in lat_bins[:-1]:
                     for lon in lon_bins[:-1]:
                         mask = df["Latitude"].between(lat, lat + bin_size) & df[
                             "Longitude"
                         ].between(lon, lon + bin_size)
                         if mask.any():
-                            mean_s4.append(df.loc[mask, "S4"].mean())
+                            max_s4.append(
+                                df.loc[mask, "S4"].max()
+                            )  # Use max instead of mean
                         else:
-                            mean_s4.append(np.nan)
+                            max_s4.append(np.nan)
 
-                # Create a DataFrame for the mean S4 values and corresponding coordinates
-                mean_s4_df = pd.DataFrame(
+                max_s4_df = pd.DataFrame(
                     {
                         "Latitude": np.repeat(lat_bins[:-1], len(lon_bins[:-1])),
                         "Longitude": np.tile(lon_bins[:-1], len(lat_bins[:-1])),
-                        "Mean_S4": mean_s4,
+                        "S4": max_s4,
                     }
                 )
                 # Interpolate missing values
                 # Create a grid of coordinates for interpolation
                 x, y = np.meshgrid(lon_bins[:-1], lat_bins[:-1])
-                z = mean_s4_df["Mean_S4"].values
+                z = max_s4_df["S4"].values
 
                 # Remove NaN values for interpolation
                 valid_idx = ~np.isnan(z)
@@ -103,30 +102,27 @@ def create_map(
                 )
 
                 # Replace NaN values in original mean_s4_df with interpolated values
-                mean_s4_df["Mean_S4"] = interp_s4.flatten()
-                mean_s4_df.dropna(axis=0, inplace=True)
+                max_s4_df["S4"] = interp_s4.flatten()
                 fig = px.density_mapbox(
-                    mean_s4_df,
+                    max_s4_df,
                     lat="Latitude",
                     lon="Longitude",
-                    z="Mean_S4",
+                    z="S4",
                     radius=heatmap_size,  # Adjust the radius as needed
-                    center=dict(
-                        lat=df["Latitude"].mean(), lon=df["Longitude"].mean()
-                    ),  # Center of the initial view
-                    range_color=(0, 1),  # Color range
+                    range_color=(0,1),  # Color range
                     color_continuous_scale=(
                         color_scale if color_scale else None
                     ),  # Color scale
-                    title="Square Bin Heatmap of Mean S4 Values",  # Map title
+                    title="Square Bin Heatmap of Max S4 Values",
                 )
             else:
-                fig = px.density_mapbox(
+                fig = px.scatter_mapbox(
                     df,
                     lat=lat,
                     lon=lon,
-                    z=color,
-                    radius=heatmap_size,
+                    color=color,
+                    size=color,  # Use S4 for both color and size
+                    size_max=heatmap_size,
                     height=1024,
                     range_color=(0, 1),
                     color_continuous_scale=color_scale if color_scale else None,

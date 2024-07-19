@@ -65,8 +65,7 @@ def gps_to_ist(gps_week, gps_seconds):
     logger.debug(f"Converting GPS time to IST: week={gps_week}, seconds={gps_seconds}")
     gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
     gps_time = gps_epoch + timedelta(weeks=int(gps_week), seconds=float(gps_seconds))
-    ist_time = gps_time + timedelta(hours=5, minutes=30)  # IST is UTC+5:30
-    return ist_time
+    return gps_time
 
 
 def calculate_lat_lon(elevation, azimuth, user_lat, user_long):

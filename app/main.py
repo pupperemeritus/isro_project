@@ -4,7 +4,7 @@ import os
 import random
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -25,24 +25,33 @@ except Exception as e:
 logger = logging.Logger(__name__)
 
 
+def find_time_window(target_datetime, window_minutes=10):
+    window_start = target_datetime + timedelta(minutes=0)
+    window_end = target_datetime + timedelta(minutes=window_minutes)
+    return window_start, window_end
+
+
 def filter_dataframe(
     df: pd.DataFrame,
-    selected_datetime,
+    time_window,
     svid,
     latitude_range,
-    longitude,
+    longitude_range,
     s4_threshold,
 ):
-    if selected_datetime:
+    if time_window:
+        window_start, window_end = time_window
         filtered_df = df[
-            (df["IST_Time"] == selected_datetime)
+            (df["IST_Time"] >= window_start)
+            & (df["IST_Time"] <= window_end)
             & (df["SVID"].isin(svid))
             & (df["Latitude"] >= latitude_range[0])
             & (df["Latitude"] <= latitude_range[1])
-            & (df["Longitude"] >= longitude[0])
-            & (df["Longitude"] <= longitude[1])
+            & (df["Longitude"] >= longitude_range[0])
+            & (df["Longitude"] <= longitude_range[1])
             & (df["S4"] >= s4_threshold)
         ]
+        return filtered_df
     else:
         filtered_df = df[
             (df["SVID"].isin(svid))
@@ -114,12 +123,19 @@ def main():
                 min_value=min(unique_dates),
                 max_value=max(unique_dates),
             )
-            selected_time = st.sidebar.time_input(
+            selected_time = st.sidebar.slider(
                 "Select Time",
                 value=unique_times[0],
+                min_value=min(unique_times),
+                max_value=max(unique_times),
+                step=timedelta(minutes=1),
+            )
+            window = st.sidebar.slider(
+                "Time Window", value=10, max_value=30, min_value=5
             )
             selected_datetime = datetime.combine(selected_date, selected_time)
             nearest_datetime = find_nearest_time(selected_datetime, unique_datetimes)
+            time_window = find_time_window(nearest_datetime, window)
             latitude_range = st.sidebar.slider("Latitude Range", 0, 90, (0, 90))
             longitude_range = st.sidebar.slider(
                 "Longitude Range", -180, 180, (-180, 180)
@@ -148,8 +164,8 @@ def main():
                 map_style = st.sidebar.selectbox(
                     "Select Map Style",
                     [
-                        "carto-darkmatter",
                         "open-street-map",
+                        "carto-darkmatter",
                         "carto-positron",
                         "stamen- terrain",
                         "stamen-toner",
@@ -168,7 +184,7 @@ def main():
                     else None
                 )
                 color_scale = st.sidebar.selectbox(
-                    "Color Scale", px.colors.named_colorscales(), index=47
+                    "Color Scale", px.colors.named_colorscales(), index=21
                 )
 
                 bin_heatmap = (
@@ -179,7 +195,7 @@ def main():
                     filtered_df,
                     "Latitude",
                     "Longitude",
-                    "S4",
+                    color="S4",
                     size=None,
                     zoom=zoom,
                     map_type=map_type,

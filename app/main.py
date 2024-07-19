@@ -55,6 +55,13 @@ def filter_dataframe(
     return filtered_df
 
 
+def find_nearest_time(target_datetime, available_datetimes):
+    return min(
+        available_datetimes,
+        key=lambda t: abs(t - target_datetime),
+    )
+
+
 def main():
     st.set_page_config(layout="wide", page_title="Dynamic S4 Data Plotter")
 
@@ -97,9 +104,9 @@ def main():
                 options=sorted(df["SVID"].unique()),
                 default=sorted(df["SVID"].unique()),
             )
+            unique_datetimes = df["IST_Time"]
             unique_dates = df["IST_Time"].dt.date.unique()
             unique_times = df["IST_Time"].dt.time.unique()
-
             # Sidebar inputs for date and time
             selected_date = st.sidebar.date_input(
                 "Select Date",
@@ -112,6 +119,7 @@ def main():
                 value=unique_times[0],
             )
             selected_datetime = datetime.combine(selected_date, selected_time)
+            nearest_datetime = find_nearest_time(selected_datetime, unique_datetimes)
             latitude_range = st.sidebar.slider("Latitude Range", 0, 90, (0, 90))
             longitude_range = st.sidebar.slider(
                 "Longitude Range", -180, 180, (-180, 180)
@@ -120,7 +128,7 @@ def main():
 
             filtered_df = filter_dataframe(
                 df,
-                selected_datetime,
+                nearest_datetime,
                 svid,
                 latitude_range,
                 longitude_range,
@@ -148,7 +156,7 @@ def main():
                         "stamen-watercolor",
                     ],
                 )
-                zoom = st.sidebar.slider("Zoom Level", 1.0, 20.0, 4.1)
+                zoom = st.sidebar.slider("Zoom Level", 1.0, 20.0, 4.0)
                 marker_size = (
                     st.sidebar.slider("Marker Size", 1, 20, 10)
                     if map_type == "Scatter"
@@ -163,6 +171,10 @@ def main():
                     "Color Scale", px.colors.named_colorscales(), index=47
                 )
 
+                bin_heatmap = (
+                    st.sidebar.toggle("Bin heatmap") if map_type == "Heatmap" else None
+                )
+
                 fig = create_map(
                     filtered_df,
                     "Latitude",
@@ -175,6 +187,7 @@ def main():
                     marker_size=marker_size,
                     heatmap_size=heatmap_size,
                     color_scale=color_scale,
+                    bin_heatmap=bin_heatmap,
                 )
 
                 with viz_container.container():
@@ -253,6 +266,7 @@ def main():
                         zoom=zoom,
                         marker_size=marker_size,
                         color_scale=color_scale,
+                        bin_heatmap=True,
                     )
                 elif viz_type == "Time Series":
                     filtered_new_df = filter_dataframe(

@@ -25,7 +25,7 @@ def create_map(
     size: Optional[str],
     map_type: str,
     map_style: str,
-    zoom: float = 4.5,
+    zoom: float = 4.0,
     marker_size: int = 5,
     heatmap_size: int = 10,
     color_scale: Optional[str] = None,
@@ -58,8 +58,8 @@ def create_map(
             if bin_heatmap:
                 # Define bin size and range
                 bin_size = 1  # Adjust as needed based on your data distribution
-                lat_range = (df["Latitude"].min(), df["Latitude"].max())
-                lon_range = (df["Longitude"].min(), df["Longitude"].max())
+                lat_range = (df["Latitude"].min() - 5, df["Latitude"].max() + 5)
+                lon_range = (df["Longitude"].min() - 5, df["Longitude"].max() + 5)
 
                 # Compute bin edges
                 lat_bins = np.arange(lat_range[0], lat_range[1], bin_size)
@@ -104,7 +104,7 @@ def create_map(
 
                 # Replace NaN values in original mean_s4_df with interpolated values
                 mean_s4_df["Mean_S4"] = interp_s4.flatten()
-
+                mean_s4_df.dropna(axis=0, inplace=True)
                 fig = px.density_mapbox(
                     mean_s4_df,
                     lat="Latitude",

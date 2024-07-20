@@ -25,12 +25,13 @@ except Exception as e:
 logger = logging.Logger(__name__)
 
 
+
 def find_time_window(target_datetime, window_minutes=10):
     window_start = target_datetime + timedelta(minutes=0)
     window_end = target_datetime + timedelta(minutes=window_minutes)
     return window_start, window_end
 
-
+@st.cache_data
 def filter_dataframe(
     df: pd.DataFrame,
     time_window,
@@ -57,8 +58,8 @@ def filter_dataframe(
             (df["SVID"].isin(svid))
             & (df["Latitude"] >= latitude_range[0])
             & (df["Latitude"] <= latitude_range[1])
-            & (df["Longitude"] >= longitude[0])
-            & (df["Longitude"] <= longitude[1])
+            & (df["Longitude"] >= longitude_range[0])
+            & (df["Longitude"] <= longitude_range[1])
             & (df["S4"] >= s4_threshold)
         ]
     return filtered_df
@@ -78,14 +79,14 @@ def main():
         """
     <style>
         .main {
-            padding: 3rem;
-            border-radius: 10px;
+            padding: 1rem;
+            border-radius: 1px;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
         .stSelectbox, .stSlider {
             border-radius: 5px;
             padding: 1px;
-            margin-bottom: 10px;
+            margin-bottom: 1px;
         }
     </style>
     """,
@@ -93,11 +94,11 @@ def main():
     )
     st.title("Dynamic S4 Data Plotter")
 
-    uploaded_file = st.file_uploader("Choose a file", type=["csv"])
+    uploaded_file = st.sidebar.file_uploader("Choose a file", type=["csv"])
 
     if uploaded_file is not None:
-        data_container = st.empty()
         viz_container = st.empty()
+        data_container = st.empty()
         download_container = st.empty()
 
         df = load_data(uploaded_file)
@@ -106,6 +107,10 @@ def main():
             with data_container.container():
                 st.write("Data Preview:")
                 st.write(df.head())
+            if 'filtered_df' not in st.session_state:
+                st.session_state.filtered_df = None
+            if 'fig' not in st.session_state:
+                st.session_state.fig = None
 
             st.sidebar.header("Filtering Options")
             svid = st.sidebar.multiselect(
@@ -144,13 +149,13 @@ def main():
 
             filtered_df = filter_dataframe(
                 df,
-                nearest_datetime,
+                time_window,
                 svid,
                 latitude_range,
                 longitude_range,
                 s4_threshold,
             )
-
+            st.session_state.filtered_df = filtered_df
             # Visualization options
             st.sidebar.header("Visualization Options")
             viz_type = st.sidebar.selectbox(
@@ -205,6 +210,8 @@ def main():
                     color_scale=color_scale,
                     bin_heatmap=bin_heatmap,
                 )
+                st.session_state.fig = fig
+
 
                 with viz_container.container():
                     if fig.data:
@@ -231,14 +238,17 @@ def main():
                     s4_threshold,
                 )
                 time_series_fig = create_time_series_plot(filtered_df, selected_svid)
+                st.session_state.time_series_fig = time_series_fig
+
                 with viz_container.container():
                     st.plotly_chart(time_series_fig, use_container_width=True)
 
             elif viz_type == "Skyplot":
                 skyplot_fig = create_skyplot(filtered_df)
+                st.session_state.skyplot_fig = skyplot_fig
+
                 with viz_container.container():
                     st.plotly_chart(skyplot_fig, use_container_width=True)
-
             with download_container.container():
                 if "fig" in locals() and fig.data:
                     unique_key = (
@@ -255,78 +265,73 @@ def main():
                     st.warning(
                         "Visualization download is not available for this type of plot."
                     )
-
-            def update_viz(new_df):
-                with data_container.container():
-                    st.write("Data Preview:")
-                    st.write(new_df.head())
-
-                filtered_new_df = filter_dataframe(
-                    df,
-                    selected_datetime,
-                    svid,
-                    latitude_range,
-                    longitude_range,
-                    s4_threshold,
-                )
-
-                if viz_type == "Map":
-                    new_fig = create_map(
-                        filtered_new_df,
-                        "Latitude",
-                        "Longitude",
-                        "S4",
-                        None,
-                        map_type,
-                        map_style,
-                        zoom=zoom,
-                        marker_size=marker_size,
-                        color_scale=color_scale,
-                        bin_heatmap=True,
-                    )
-                elif viz_type == "Time Series":
-                    filtered_new_df = filter_dataframe(
-                        df,
-                        selected_datetime,
-                        svid,
-                        latitude_range,
-                        longitude_range,
-                        s4_threshold,
-                    )
-                    new_fig = create_time_series_plot(filtered_new_df, selected_svid)
-                else:  # Skyplot
-                    filtered_df = filter_dataframe(
-                        df,
-                        selected_datetime,
-                        svid,
-                        latitude_range,
-                        longitude_range,
-                        s4_threshold,
-                    )
-                    new_fig = create_skyplot(filtered_new_df)
-
-                with viz_container.container():
-                    if new_fig.data:
-                        st.plotly_chart(new_fig, use_container_width=True)
-                    else:
-                        st.error(
-                            "Unable to create visualization. Please check your data and selected options."
-                        )
-
-                with download_container.container():
-                    if new_fig.data:
-                        unique_key = f"download_button_{time.time()}_{random.randint(0, 1000000)}"
+            @st.cache_data
+            def update_download_button(fig):
+                if fig.data:
+                    unique_key = f"download_button_{time.time()}_{random.randint(0, 1000000)}"
+                    with download_container.container():
                         st.download_button(
                             label="Download Visualization as HTML",
-                            data=new_fig.to_html(),
+                            data=fig.to_html(),
                             file_name="s4_visualization.html",
                             mime="text/html",
                             key=unique_key,
                         )
-                    else:
-                        st.warning(
-                            "Visualization download is not available for this type of plot."
-                        )
+                else:
+                    with download_container.container():
+                        st.warning("Visualization download is not available for this type of plot.")
+
+            def update_viz(new_df):
+                # Only update if the data has changed
+                if not new_df.equals(df):
+                    with data_container.container():
+                        st.write("Data Preview:")
+                        st.write(new_df.head())
+
+                    filtered_new_df = filter_dataframe(
+                        new_df,
+                        selected_datetime,
+                        svid,
+                        latitude_range,
+                        longitude_range,
+                        s4_threshold,
+                    )
+
+                    # Only update visualization if filtered data has changed
+                    if not filtered_new_df.equals(st.session_state.filtered_df):
+                        st.session_state.filtered_df = filtered_new_df
+
+                        if viz_type == "Map":
+                            new_fig = create_map(
+                                filtered_new_df,
+                                "Latitude",
+                                "Longitude",
+                                "S4",
+                                None,
+                                map_type,
+                                map_style,
+                                zoom=zoom,
+                                marker_size=marker_size,
+                                color_scale=color_scale,
+                                bin_heatmap=True,
+                            )
+                        elif viz_type == "Time Series":
+                            new_fig = create_time_series_plot(filtered_new_df, selected_svid)
+                        else:  # Skyplot
+                            new_fig = create_skyplot(filtered_new_df)
+
+                        st.session_state.fig = new_fig
+
+                        with viz_container.container():
+                            if new_fig.data:
+                                st.plotly_chart(new_fig, use_container_width=True)
+                            else:
+                                st.error(
+                                    "Unable to create visualization. Please check your data and selected options."
+                                )
+
+                        # Update download button
+                        update_download_button(new_fig)
 
             file_watcher = create_file_watcher(uploaded_file, update_viz)
             watcher_thread = threading.Thread(target=file_watcher.watch, daemon=True)

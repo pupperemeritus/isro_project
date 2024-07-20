@@ -2,11 +2,13 @@ import logging
 import logging.config
 import os
 from typing import Optional
-from scipy.interpolate import griddata
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import streamlit as st
+from scipy.interpolate import griddata
 
 try:
     logging.config.fileConfig(
@@ -17,6 +19,7 @@ except Exception as e:
 logger = logging.Logger(__name__)
 
 
+@st.cache_data
 def create_map(
     df: pd.DataFrame,
     lat: str,

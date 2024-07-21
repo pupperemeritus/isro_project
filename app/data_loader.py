@@ -3,6 +3,7 @@ import hashlib
 import logging
 import logging.config
 import time
+import warnings
 from typing import Optional
 
 import polars as pl
@@ -11,6 +12,8 @@ from logging_conf import log_config
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 from utils import add_lat_lon_to_df, gps_to_ist
 
+warnings.filterwarnings("ignore")
+
 try:
     logging.config.dictConfig(log_config)
 except Exception as e:
@@ -18,7 +21,7 @@ except Exception as e:
 logger = logging.Logger(__name__)
 
 
-@st.cache_resource
+@st.cache_resource(max_entries=1)
 def load_data(file: UploadedFile) -> Optional[pl.DataFrame]:
     try:
         logger.info(f"Starting to load data from file: {file.name}")
@@ -27,6 +30,8 @@ def load_data(file: UploadedFile) -> Optional[pl.DataFrame]:
             df = pl.read_ipc(file)
         elif file.name.endswith(".csv"):
             df = pl.read_csv(file)
+        elif file.name.endswith(".parquet"):
+            df = pl.read_parquet(file)
 
         if df.is_empty():  # Polars uses is_empty() instead of empty attribute
             logger.warning("Loaded empty DataFrame from IPC file")
@@ -73,12 +78,8 @@ def load_data(file: UploadedFile) -> Optional[pl.DataFrame]:
                     lambda x: gps_to_ist(x["GPS_WN"], x["GPS_TOW"]),
                     return_dtype=datetime.datetime,
                 )
-                .alias("UTC_Time")
+                .alias("IST_Time")
             ]
-        )
-        # Polars doesn't have a direct equivalent to pd.Timedelta, use datetime
-        df = df.with_columns(
-            [(pl.col("UTC_Time") + pl.duration(hours=5, minutes=30)).alias("IST_Time")]
         )
 
         logger.debug("Performing basic data cleaning")
@@ -102,32 +103,3 @@ def load_data(file: UploadedFile) -> Optional[pl.DataFrame]:
     except Exception as e:
         logger.exception(f"Error loading data: {str(e)}")
         return None
-
-
-class FileWatcher:
-    def __init__(self, file, callback):
-        self.file = file
-        self.callback = callback
-        self.previous_hash = None
-        self.is_running = True
-
-    def watch(self):
-        logger.info("File watcher started")
-        while self.is_running:
-            current_hash = hashlib.md5(self.file.getvalue()).hexdigest()
-            if current_hash != self.previous_hash:
-                logger.info("File change detected. Reloading data.")
-                self.previous_hash = current_hash
-                df = load_data(self.file)
-                if df is not None:
-                    self.callback(df)
-            time.sleep(100)
-
-    def stop(self):
-        logger.info("Stopping file watcher")
-        self.is_running = False
-
-
-def create_file_watcher(file, callback):
-    logger.info("Creating file watcher")
-    return FileWatcher(file, callback)

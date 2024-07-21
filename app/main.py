@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.express as px
 import polars as pl
 import streamlit as st
-from data_loader import create_file_watcher, load_data
+from data_loader import load_data
 from logging_conf import log_config
 from map_creator import create_map
 from visualizations import create_skyplot, create_time_series_plot
@@ -69,24 +69,100 @@ def main():
 
     st.markdown(
         """
-    <style>
-        .main {
-            padding: 1rem;
-            border-radius: 1px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-        .stSelectbox, .stSlider {
-            border-radius: 5px;
-            padding: 1px;
-            margin-bottom: 1px;
-        }
-    </style>
+        <style>
+            /* Main container styling */
+            .main {
+                padding: 2rem; /* Generous padding for a spacious feel */
+                border-radius: 12px; /* Smooth, pronounced corners */
+                box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1); /* Enhanced shadow for modern effect */
+                max-width: 100%; /* Ensure responsiveness */
+                margin: 0 auto; /* Center align container */
+                font-family: Arial, sans-serif; /* Modern font for consistency */
+            }
+
+            /* Responsive design for smaller screens */
+            @media (max-width: 768px) {
+                .main {
+                    padding: 1rem; /* Reduced padding on smaller screens */
+                }
+            }
+
+            /* Styling for Selectbox and Slider */
+            .stSelectbox, .stSlider {
+                border-radius: 8px; /* Consistent rounded corners */
+                padding: 0.75rem; /* Adequate padding for better usability */
+                margin-bottom: 1.5rem; /* Increased spacing between elements */
+                border: 1px solid #e0e0e0; /* Subtle border */
+                transition: border-color 0.3s ease, box-shadow 0.3s ease; /* Smooth transition for border and shadow */
+            }
+
+            /* Hover effects */
+            .stSelectbox:hover, .stSlider:hover {
+                border-color: #bdbdbd; /* Slightly darker border */
+                box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1); /* Subtle shadow effect */
+            }
+
+            /* Focus states */
+            .stSelectbox:focus, .stSlider:focus {
+                border-color: #007bff; /* Highlight border color */
+                outline: none; /* Remove default outline */
+                box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.2); /* Focus shadow for accessibility */
+            }
+
+            /* Make sure elements are responsive */
+            .stSelectbox select, .stSlider input {
+                width: 100%; /* Full width for input elements */
+            }
+
+            /* Additional styling for sliders */
+            .stSlider input[type="range"] {
+                -webkit-appearance: none; /* Remove default appearance */
+                width: 100%; /* Full width */
+                height: 8px; /* Height of the slider */
+                background: transparent; /* No background */
+                border-radius: 4px; /* Rounded corners for the track */
+                cursor: pointer; /* Pointer cursor */
+                outline: none; /* Remove default outline */
+                transition: background 0.3s ease; /* Smooth transition for background changes */
+            }
+
+            .stSlider input[type="range"]::-webkit-slider-thumb {
+                -webkit-appearance: none; /* Remove default thumb appearance */
+                width: 16px; /* Thumb width */
+                height: 16px; /* Thumb height */
+                border-radius: 50%; /* Rounded thumb */
+                background: #007bff; /* Thumb color */
+                cursor: pointer; /* Pointer cursor */
+                transition: background 0.3s ease; /* Smooth transition for thumb changes */
+            }
+
+            .stSlider input[type="range"]::-moz-range-thumb {
+                width: 16px; /* Thumb width */
+                height: 16px; /* Thumb height */
+                border-radius: 50%; /* Rounded thumb */
+                background: #007bff; /* Thumb color */
+                cursor: pointer; /* Pointer cursor */
+                transition: background 0.3s ease; /* Smooth transition for thumb changes */
+            }
+
+            /* Additional styling for select boxes */
+            .stSelectbox select {
+                border: 1px solid #e0e0e0; /* Border color */
+                padding: 0.5rem; /* Padding inside select */
+                border-radius: 8px; /* Rounded corners */
+                font-size: 1rem; /* Consistent font size */
+                cursor: pointer; /* Pointer cursor */
+                transition: border-color 0.3s ease; /* Smooth transition for border color */
+            }
+        </style>
     """,
         unsafe_allow_html=True,
     )
     st.title("Dynamic S4 Data Plotter")
 
-    uploaded_file = st.sidebar.file_uploader("Choose a file", type=[".arrow", ".csv"])
+    uploaded_file = st.sidebar.file_uploader(
+        "Choose a file", type=[".arrow", ".csv", ".parquet"], key="uploaded_file"
+    )
 
     if uploaded_file is not None:
         viz_container = st.empty()
@@ -98,17 +174,8 @@ def main():
             with data_container.container():
                 st.write("Data Preview:")
                 st.write(df.head(3))
-            if "filtered_df" not in st.session_state:
-                st.session_state.filtered_df = None
-            if "fig" not in st.session_state:
-                st.session_state.fig = None
 
-            st.sidebar.header("Filtering Options")
-            svid = st.sidebar.multiselect(
-                "Select SVIDs",
-                options=sorted(df["SVID"].unique().to_list()),
-                default=sorted(df["SVID"].unique().to_list()),
-            )
+            st.sidebar.header("Filtering Options and Visualization Options")
 
             unique_dates = (
                 df.select(pl.col("IST_Time").dt.date())
@@ -128,7 +195,7 @@ def main():
             # Sidebar inputs for date and time
             selected_date = st.sidebar.date_input(
                 "Select Date",
-                value=unique_dates[0],
+                value=unique_dates[0],  
                 min_value=min(unique_dates),
                 max_value=max(unique_dates),
             )
@@ -142,7 +209,7 @@ def main():
             )
 
             window = st.sidebar.slider(
-                "Time Window", value=10, max_value=30, min_value=5
+                "Time Window", value=10, max_value=30, min_value=1
             )
             unique_datetimes = (
                 df.select(pl.col("IST_Time").dt.replace_time_zone(None))
@@ -150,14 +217,26 @@ def main():
                 .to_series()
                 .sort()
             )
+
             selected_datetime = datetime.combine(selected_date, selected_time)
             nearest_datetime = find_nearest_time(selected_datetime, unique_datetimes)
             time_window = find_time_window(nearest_datetime, window)
+
             latitude_range = st.sidebar.slider("Latitude Range", 0, 90, (0, 90))
             longitude_range = st.sidebar.slider(
                 "Longitude Range", -180, 180, (-180, 180)
             )
+
             s4_threshold = st.sidebar.slider("S4 Threshold", 0.0, 1.0, 0.0)
+            # Visualization options
+            viz_type = st.sidebar.selectbox(
+                "Select Visualization", ["Map", "Time Series", "Skyplot"]
+            )
+            svid = st.sidebar.multiselect(
+                "Select SVIDs",
+                options=sorted(df["SVID"].unique().to_list()),
+                default=sorted(df["SVID"].unique().to_list()),
+            )
 
             filtered_df = filter_dataframe(
                 df,
@@ -167,117 +246,114 @@ def main():
                 longitude_range,
                 s4_threshold,
             )
-            st.session_state.filtered_df = filtered_df
-            # Visualization options
-            st.sidebar.header("Visualization Options")
-            viz_type = st.sidebar.selectbox(
-                "Select Visualization", ["Map", "Time Series", "Skyplot"]
-            )
 
-            if viz_type == "Map":
-                map_type = st.sidebar.selectbox(
-                    "Select Map Type", ["Scatter", "Heatmap"], index=1
-                )
-                map_style = st.sidebar.selectbox(
-                    "Select Map Style",
-                    [
-                        "open-street-map",
-                        "carto-darkmatter",
-                        "carto-positron",
-                        "stamen- terrain",
-                        "stamen-toner",
-                        "stamen-watercolor",
-                    ],
-                )
-                zoom = st.sidebar.slider("Zoom Level", 1.0, 20.0, 4.0)
-                marker_size = (
-                    st.sidebar.slider("Marker Size", 1, 20, 10)
-                    if map_type == "Scatter"
-                    else None
-                )
-                heatmap_size = (
-                    st.sidebar.slider("Heatmap Size", 1, 40, 20)
-                    if map_type == "Heatmap"
-                    else None
-                )
-                color_scale = st.sidebar.selectbox(
-                    "Color Scale", px.colors.named_colorscales(), index=21
-                )
+            match viz_type:
+                case "Map":
+                    map_type = st.sidebar.selectbox(
+                        "Select Map Type", ["Scatter", "Heatmap"], index=1
+                    )
+                    map_style = st.sidebar.selectbox(
+                        "Select Map Style",
+                        [
+                            "open-street-map",
+                            "carto-darkmatter",
+                            "carto-positron",
+                            "stamen- terrain",
+                            "stamen-toner",
+                            "stamen-watercolor",
+                        ],
+                    )
+                    marker_size = (
+                        st.sidebar.slider("Marker Size", 1, 20, 10)
+                        if map_type == "Scatter"
+                        else None
+                    )
+                    heatmap_size = (
+                        st.sidebar.slider("Heatmap Size", 1, 80, 40)
+                        if map_type == "Heatmap"
+                        else None
+                    )
+                    color_scale = st.sidebar.selectbox(
+                        "Color Scale", px.colors.named_colorscales(), index=21
+                    )
 
-                bin_heatmap = (
-                    st.sidebar.toggle("Bin heatmap") if map_type == "Heatmap" else None
-                )
+                    bin_heatmap = (
+                        st.sidebar.toggle("Bin heatmap")
+                        if map_type == "Heatmap"
+                        else None
+                    )
 
-                fig = create_map(
-                    filtered_df,
-                    "Latitude",
-                    "Longitude",
-                    color="S4",
-                    size=None,
-                    zoom=zoom,
-                    map_type=map_type,
-                    map_style=map_style,
-                    marker_size=marker_size,
-                    heatmap_size=heatmap_size,
-                    color_scale=color_scale,
-                    bin_heatmap=bin_heatmap,
-                )
-                st.session_state.fig = fig
+                    fig = create_map(
+                        filtered_df,
+                        "Latitude",
+                        "Longitude",
+                        color="S4",
+                        size=None,
+                        map_type=map_type,
+                        map_style=map_style,
+                        marker_size=marker_size,
+                        heatmap_size=heatmap_size,
+                        color_scale=color_scale,
+                        bin_heatmap=bin_heatmap,
+                    )
 
-                with viz_container.container():
-                    if fig.data:
-                        fig.update_layout(
-                            height=1024,  # Adjust this value as needed
-                            width=None,  # Allow the width to be responsive
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.error(
-                            "Unable to create map. Please check your data and selected options."
-                        )
+                    with viz_container.container():
+                        if fig.data:
+                            fig.update_layout(
+                                height=1024,  # Adjust this value as needed
+                                width=None,  # Allow the width to be responsive
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.error(
+                                "Unable to create map. Please check your data and selected options."
+                            )
 
-            elif viz_type == "Time Series":
-                selected_svid = st.sidebar.selectbox(
-                    "Select SVID for Time Series", sorted(filtered_df["SVID"].unique())
-                )
-                filtered_df = filter_dataframe(
-                    df,
-                    None,
-                    svid,
-                    latitude_range,
-                    longitude_range,
-                    s4_threshold,
-                )
-                time_series_fig = create_time_series_plot(filtered_df, selected_svid)
-                st.session_state.time_series_fig = time_series_fig
+                case "Time Series":
+                    selected_svid = st.sidebar.selectbox(
+                        "Select SVID for Time Series",
+                        sorted(filtered_df["SVID"].unique()),
+                    )
+                    filtered_df = filter_dataframe(
+                        df,
+                        None,
+                        svid,
+                        latitude_range,
+                        longitude_range,
+                        s4_threshold,
+                    )
+                    time_series_fig = create_time_series_plot(
+                        filtered_df, selected_svid
+                    )
 
-                with viz_container.container():
-                    st.plotly_chart(time_series_fig, use_container_width=True)
+                    with viz_container.container():
+                        st.plotly_chart(time_series_fig, use_container_width=True)
 
-            elif viz_type == "Skyplot":
-                skyplot_fig = create_skyplot(filtered_df)
-                st.session_state.skyplot_fig = skyplot_fig
+                case "Skyplot":
+                    skyplot_fig = create_skyplot(filtered_df)
 
-                with viz_container.container():
-                    st.plotly_chart(skyplot_fig, use_container_width=True)
+                    with viz_container.container():
+                        st.plotly_chart(skyplot_fig, use_container_width=True)
             with download_container.container():
-                if "fig" in locals() and fig.data:
-                    unique_key = (
-                        f"download_button_{time.time()}_{random.randint(0, 1000000)}"
-                    )
-                    st.download_button(
-                        label="Download Visualization as HTML",
-                        data=fig.to_html(),
-                        file_name="s4_visualization.html",
-                        mime="text/html",
-                        key=unique_key,
-                    )
-                else:
-                    st.warning(
-                        "Visualization download is not available for this type of plot."
-                    )
+                match viz_type:
+                    case "Map":
+                        viz_fig = fig
+                    case "Time Series":
+                        viz_fig = time_series_fig
+                    case "Skyplot":
+                        viz_fig = skyplot_fig
+                unique_key = (
+                    f"download_button_{time.time()}_{random.randint(0, 1000000)}"
+                )
+                st.download_button(
+                    label="Download Visualization as HTML",
+                    data=viz_fig.to_html(),
+                    file_name="s4_visualization.html",
+                    mime="text/html",
+                    key=unique_key,
+                )
 
-            @st.cache_data
+            @st.cache_resource(max_entries=2)
             def update_download_button(fig):
                 if fig.data:
                     unique_key = (
@@ -313,49 +389,37 @@ def main():
                         s4_threshold,
                     )
 
-                    # Only update visualization if filtered data has changed
-                    if not filtered_new_df.equals(st.session_state.filtered_df):
-                        st.session_state.filtered_df = filtered_new_df
-
-                        if viz_type == "Map":
-                            new_fig = create_map(
-                                filtered_new_df,
-                                "Latitude",
-                                "Longitude",
-                                "S4",
-                                None,
-                                map_type,
-                                map_style,
-                                zoom=zoom,
-                                marker_size=marker_size,
-                                color_scale=color_scale,
-                                bin_heatmap=True,
+                    if viz_type == "Map":
+                        new_fig = create_map(
+                            filtered_new_df,
+                            "Latitude",
+                            "Longitude",
+                            "S4",
+                            None,
+                            map_type,
+                            map_style,
+                            marker_size=marker_size,
+                            color_scale=color_scale,
+                            bin_heatmap=True,
+                        )
+                    elif viz_type == "Time Series":
+                        new_fig = create_time_series_plot(
+                            filtered_new_df, selected_svid
+                        )
+                    else:  # Skyplot
+                        new_fig = create_skyplot(filtered_new_df)
+                    with viz_container.container():
+                        if new_fig.data:
+                            st.plotly_chart(new_fig, use_container_width=True)
+                        else:
+                            st.error(
+                                "Unable to create visualization. Please check your data and selected options."
                             )
-                        elif viz_type == "Time Series":
-                            new_fig = create_time_series_plot(
-                                filtered_new_df, selected_svid
-                            )
-                        else:  # Skyplot
-                            new_fig = create_skyplot(filtered_new_df)
 
-                        st.session_state.fig = new_fig
+                    # Update download button
+                    update_download_button(new_fig)
 
-                        with viz_container.container():
-                            if new_fig.data:
-                                st.plotly_chart(new_fig, use_container_width=True)
-                            else:
-                                st.error(
-                                    "Unable to create visualization. Please check your data and selected options."
-                                )
-
-                        # Update download button
-                        update_download_button(new_fig)
-
-            file_watcher = create_file_watcher(uploaded_file, update_viz)
-            watcher_thread = threading.Thread(target=file_watcher.watch, daemon=True)
-            watcher_thread.start()
-
-    st.sidebar.markdown(
+    st.markdown(
         """
     ## Help
     - **Map**: Shows S4 data on a map. Use 'Scatter' for individual points or 'Heatmap' for density.

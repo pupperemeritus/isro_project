@@ -4,7 +4,7 @@ import sys
 import polars as pl
 
 
-def combine_data_into_csv(
+def combine_data_into_ipc(
     csv_directory: str = sys.argv[1], output_file: str = sys.argv[2]
 ):
     # Get all CSV files in the directory
@@ -17,8 +17,29 @@ def combine_data_into_csv(
     # Write to Arrow IPC format
     concatenated_df.write_ipc(output_file)
 
+    print(concatenated_df)
+
+    print(f"Concatenated CSV files and exported to {output_file}")
+
+
+def combine_data_into_parquet(
+    csv_directory: str = sys.argv[1], output_file: str = sys.argv[2]
+):
+    # Get all CSV files in the directory
+    csv_files = [f for f in os.listdir(csv_directory) if f.endswith(".csv")]
+
+    # Read and concatenate CSV files
+    dfs = [pl.read_csv(os.path.join(csv_directory, file)) for file in csv_files]
+    concatenated_df = pl.concat(dfs)
+    print(concatenated_df.head())
+    # Write to Arrow IPC format
+    concatenated_df.write_parquet(output_file)
+
     print(f"Concatenated CSV files and exported to {output_file}")
 
 
 if __name__ == "__main__":
-    combine_data_into_csv(sys.argv[1], sys.argv[2])
+    if sys.argv[3] == "ipc":
+        combine_data_into_ipc(sys.argv[1], sys.argv[2])
+    elif sys.argv[3] == "parquet":
+        combine_data_into_parquet(sys.argv[1], sys.argv[2])

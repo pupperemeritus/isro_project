@@ -11,6 +11,7 @@ import polars as pl
 import streamlit as st
 from scipy.interpolate import griddata
 
+
 try:
     logging.config.dictConfig(log_config)
 except Exception as e:
@@ -41,99 +42,118 @@ def create_map(
 
         center_lat = 20.593684
         center_lon = 78.96288
-
-        if map_type == "Scatter":
-            fig = px.scatter_mapbox(
-                df.to_pandas(),
-                lat=lat,
-                lon=lon,
-                color=color,
-                size=size if size else None,
-                height=1024,
-                range_color=(0, 1),
-                color_continuous_scale=color_scale if color_scale else None,
-                hover_data=["SVID", "IST_Time", "S4"],
-            )
-            fig.update_traces(marker=dict(size=marker_size))
-        elif map_type == "Heatmap":
-            if bin_heatmap:
-                # Define bin size and range
-                bin_size = 1
-                lat_range = (0, 40)
-                lon_range = (65, 100)
-
-                lat_bins = np.arange(lat_range[0], lat_range[1], bin_size)
-                lon_bins = np.arange(lon_range[0], lon_range[1], bin_size)
-
-                max_s4 = []
-                for lat_val in lat_bins[:-1]:
-                    for lon_val in lon_bins[:-1]:
-                        mask = df["Latitude"].is_between(
-                            lat_val, lat_val + bin_size
-                        ) & df["Longitude"].is_between(lon_val, lon_val + bin_size)
-                        if df.filter(mask).height > 0:
-                            max_s4.append(df.filter(mask)["S4"].max())
-                        else:
-                            max_s4.append(np.nan)
-
-                max_s4_df = pl.DataFrame(
-                    {
-                        "Latitude": np.repeat(lat_bins[:-1], len(lon_bins[:-1])),
-                        "Longitude": np.tile(lon_bins[:-1], len(lat_bins[:-1])),
-                        "S4": max_s4,
-                    }
-                )
-
-                # Interpolate missing values
-                x, y = np.meshgrid(lon_bins[:-1], lat_bins[:-1])
-                z = max_s4_df["S4"].to_numpy()
-
-                valid_idx = ~np.isnan(z)
-                x_valid = x.flatten()[valid_idx]
-                y_valid = y.flatten()[valid_idx]
-                z_valid = z[valid_idx]
-
-                interp_method = "cubic"
-                interp_s4 = griddata(
-                    (x_valid, y_valid), z_valid, (x, y), method=interp_method
-                )
-
-                max_s4_df = max_s4_df.with_columns(pl.Series("S4", interp_s4.flatten()))
-                fig = px.density_mapbox(
-                    max_s4_df.to_pandas(),
-                    lat="Latitude",
-                    lon="Longitude",
-                    z="S4",
-                    radius=heatmap_size,  # Adjust the radius as needed
-                    range_color=(0, 1),  # Color range
-                    color_continuous_scale=(
-                        color_scale if color_scale else None
-                    ),  # Color scale
-                    title="Square Bin Heatmap of Max S4 Values",
-                )
-            else:
+        match map_type:
+            case "Scatter":
                 fig = px.scatter_mapbox(
                     df.to_pandas(),
                     lat=lat,
                     lon=lon,
                     color=color,
-                    size=color,  # Use S4 for both color and size
-                    size_max=heatmap_size,
+                    size=size if size else None,
                     height=1024,
                     range_color=(0, 1),
                     color_continuous_scale=color_scale if color_scale else None,
                     hover_data=["SVID", "IST_Time", "S4"],
+                    title="Scatter Mapbox for S4 Values",
                 )
-        else:
-            logger.error(f"Unsupported map type: {map_type}")
-            return go.Figure()
+                fig.update_traces(marker=dict(size=marker_size))
+            case "Heatmap":
+                if bin_heatmap:
+                    # Define bin size and range
+                    bin_size = 1
+                    lat_range = (0, 40)
+                    lon_range = (65, 100)
+
+                    lat_bins = np.arange(lat_range[0], lat_range[1], bin_size)
+                    lon_bins = np.arange(lon_range[0], lon_range[1], bin_size)
+
+                    # Create a 2D grid for the binned data
+                    binned_data = np.zeros((len(lat_bins) - 1, len(lon_bins) - 1))
+
+                    for i, lat_val in enumerate(lat_bins[:-1]):
+                        for j, lon_val in enumerate(lon_bins[:-1]):
+                            mask = df["Latitude"].is_between(
+                                lat_val, lat_val + bin_size
+                            ) & df["Longitude"].is_between(lon_val, lon_val + bin_size)
+                            filtered = df.filter(mask)
+                            if filtered.height > 0:
+                                binned_data[i, j] = filtered["S4"].max()
+
+                    # Create meshgrid for interpolation
+                    x, y = np.meshgrid(
+                        lon_bins[:-1] + bin_size / 2, lat_bins[:-1] + bin_size / 2
+                    )
+
+                    # Mask out empty bins
+                    valid_mask = ~np.isnan(binned_data)
+                    x_valid = x[valid_mask]
+                    y_valid = y[valid_mask]
+                    z_valid = binned_data[valid_mask]
+
+                    # Interpolate
+                    grid_x, grid_y = np.mgrid[
+                        lon_range[0] : lon_range[1] : 100j,
+                        lat_range[0] : lat_range[1] : 100j,
+                    ]
+                    grid_z = griddata(
+                        (x_valid, y_valid),
+                        z_valid,
+                        (grid_x, grid_y),
+                        method="cubic",
+                        fill_value=0,
+                    )
+
+                    # Create the density_mapbox
+                    fig = go.Figure(
+                        go.Densitymapbox(
+                            lat=grid_y.flatten(),
+                            lon=grid_x.flatten(),
+                            z=grid_z.flatten(),
+                            radius=20,
+                            colorscale=color_scale if color_scale else "Viridis",
+                            zmin=0,
+                            zmax=1,
+                            colorbar=dict(title="S4"),
+                            hovertext=[f"S4: {s4:.2f}" for s4 in grid_z.flatten()],
+                            hoverinfo="text+lon+lat",
+                            hovertemplate="S4: %{z:.2f}\nLatitude: %{lat:.0f}\nLong: %{lon:.0f}<extra></extra>",
+                        )
+                    )
+
+                    # Update the layout
+                    fig.update_layout(
+                        title="Intensity-based Heatmap of S4 Values",
+                        mapbox_style=map_style,
+                        mapbox=dict(
+                            center=dict(lat=20, lon=82.5), zoom=4
+                        ),  # Center of India
+                        width=1000,
+                        height=800,
+                    )
+                else:
+                    fig = px.scatter_mapbox(
+                        df.to_pandas(),
+                        lat=lat,
+                        lon=lon,
+                        color=color,
+                        size=color,  # Use S4 for both color and size
+                        size_max=heatmap_size,
+                        height=1024,
+                        title="Scatter Mapbox for S4 Values",
+                        range_color=(0, 1),
+                        color_continuous_scale=color_scale if color_scale else None,
+                        hover_data=["SVID", "IST_Time", "S4"],
+                    )
+            case "":
+                logger.error(f"Unsupported map type: {map_type}")
+                return go.Figure()
 
         fig.update_layout(
             mapbox=dict(
                 style=map_style,
                 center=dict(lat=center_lat, lon=center_lon),
                 zoom=zoom,  # Adjust this value to get the desired initial zoom level
-            )
+            ),
         )
         logger.info(f"Map created successfully. Type: {map_type}")
         return fig

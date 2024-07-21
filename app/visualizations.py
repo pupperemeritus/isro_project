@@ -5,11 +5,11 @@ import os
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import polars as pl
+from logging_conf import log_config
 
 try:
-    logging.config.fileConfig(
-        os.path.join(os.getcwd(), "app", "logging.conf"), disable_existing_loggers=False
-    )
+    logging.config.dictConfig(log_config, disable_existing_loggers=False)
 except Exception as e:
     logging.error("Cwd must be root of project directory")
 logger = logging.Logger(__name__)

@@ -10,13 +10,12 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 from data_loader import create_file_watcher, load_data
+from logging_conf import log_config
 from map_creator import create_map
 from visualizations import create_skyplot, create_time_series_plot
 
 try:
-    logging.config.fileConfig(
-        os.path.join(os.getcwd(), "app", "logging.conf"), disable_existing_loggers=False
-    )
+    logging.config.dictConfig(log_config, disable_existing_loggers=False)
 except Exception as e:
     logging.error(e)
     logging.error(
@@ -30,6 +29,7 @@ def find_time_window(target_datetime, window_minutes=10):
     window_start = target_datetime + timedelta(minutes=0)
     window_end = target_datetime + timedelta(minutes=window_minutes)
     return window_start, window_end
+
 
 @st.cache_data
 def filter_dataframe(

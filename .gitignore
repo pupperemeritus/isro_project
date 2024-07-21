@@ -114,3 +114,5 @@ testdata.csv
 
 *.csv
 *.xlsx
+
+logs

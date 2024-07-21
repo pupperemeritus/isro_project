@@ -5,18 +5,17 @@ from datetime import datetime, timedelta
 from typing import List
 
 import numpy as np
-import pandas as pd
+import polars as pl
+from logging_conf import log_config
 
 try:
-    logging.config.fileConfig(
-        os.path.join(os.getcwd(), "app", "logging.conf"), disable_existing_loggers=False
-    )
+    logging.config.dictConfig(log_config, disable_existing_loggers=False)
 except Exception as e:
     logging.error("Cwd must be root of project directory")
 logger = logging.Logger(__name__)
 
 
-def get_numeric_columns(df: pd.DataFrame) -> List[str]:
+def get_numeric_columns(df: pl.DataFrame) -> List[str]:
     logger.debug("Getting numeric columns")
     return df.select_dtypes(include=["int64", "float64"]).columns.tolist()
 

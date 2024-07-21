@@ -8,10 +8,10 @@ from typing import Optional
 import pandas as pd
 from utils import add_lat_lon_to_df, gps_to_ist
 
+from app import logging_conf
+
 try:
-    logging.config.fileConfig(
-        os.path.join(os.getcwd(), "app", "logging.conf"), disable_existing_loggers=False
-    )
+    logging.config.dictConfig(logging_conf, disable_existing_loggers=False)
 except Exception as e:
     logging.error("Cwd must be root of project directory")
 logger = logging.Logger(__name__)

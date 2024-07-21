@@ -1,29 +1,35 @@
+import datetime
 import hashlib
 import logging
 import logging.config
-import os
 import time
 from typing import Optional
 
-import pandas as pd
+import polars as pl
+import streamlit as st
+from logging_conf import log_config
+from streamlit.runtime.uploaded_file_manager import UploadedFile
 from utils import add_lat_lon_to_df, gps_to_ist
 
-from app import logging_conf
-
 try:
-    logging.config.dictConfig(logging_conf, disable_existing_loggers=False)
+    logging.config.dictConfig(log_config)
 except Exception as e:
-    logging.error("Cwd must be root of project directory")
+    logging.error(e)
 logger = logging.Logger(__name__)
 
 
-def load_data(file) -> Optional[pd.DataFrame]:
+@st.cache_resource
+def load_data(file: UploadedFile) -> Optional[pl.DataFrame]:
     try:
         logger.info(f"Starting to load data from file: {file.name}")
-        df = pd.read_csv(file)
+        if file.name.endswith(".arrow"):
+            # Polars uses read_ipc for Arrow IPC format instead of read_csv
+            df = pl.read_ipc(file)
+        elif file.name.endswith(".csv"):
+            df = pl.read_csv(file)
 
-        if df.empty:
-            logger.warning("Loaded empty DataFrame from CSV")
+        if df.is_empty():  # Polars uses is_empty() instead of empty attribute
+            logger.warning("Loaded empty DataFrame from IPC file")
 
         required_columns = [
             "WN, GPS Week Number",
@@ -34,14 +40,16 @@ def load_data(file) -> Optional[pd.DataFrame]:
             "Total S4 on Sig1 (dimensionless)",
         ]
 
+        # Polars uses a different method to check for missing columns
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             logger.error(f"Missing required columns: {', '.join(missing_columns)}")
             return None
 
         logger.debug("Renaming columns for easier handling")
+        # Polars uses a different syntax for renaming columns
         df = df.rename(
-            columns={
+            {
                 "WN, GPS Week Number": "GPS_WN",
                 "TOW, GPS Time of Week (seconds)": "GPS_TOW",
                 "Azimuth (degrees)": "Azimuth",
@@ -53,16 +61,29 @@ def load_data(file) -> Optional[pd.DataFrame]:
         logger.debug("Adding latitude and longitude columns")
         user_lat = 17.39
         user_lon = 78.31
+        # Assuming add_lat_lon_to_df is adapted for Polars
         df = add_lat_lon_to_df(df, "Elevation", "Azimuth", user_lat, user_lon)
 
         logger.debug("Converting GPS time to UTC and IST")
-        df["UTC_Time"] = df.apply(
-            lambda row: gps_to_ist(row["GPS_WN"], row["GPS_TOW"]), axis=1
+        # Polars uses a different approach for applying functions to columns
+        df = df.with_columns(
+            [
+                pl.struct(["GPS_WN", "GPS_TOW"])
+                .map_elements(
+                    lambda x: gps_to_ist(x["GPS_WN"], x["GPS_TOW"]),
+                    return_dtype=datetime.datetime,
+                )
+                .alias("UTC_Time")
+            ]
         )
-        df["IST_Time"] = df["UTC_Time"] + pd.Timedelta(hours=5, minutes=30)
+        # Polars doesn't have a direct equivalent to pd.Timedelta, use datetime
+        df = df.with_columns(
+            [(pl.col("UTC_Time") + pl.duration(hours=5, minutes=30)).alias("IST_Time")]
+        )
 
         logger.debug("Performing basic data cleaning")
-        df = df.dropna(
+        # Polars uses drop_nulls instead of dropna
+        df = df.drop_nulls(
             subset=[
                 "GPS_WN",
                 "GPS_TOW",
@@ -74,6 +95,7 @@ def load_data(file) -> Optional[pd.DataFrame]:
                 "Longitude",
             ]
         )
+        df = df.with_columns(pl.col("IST_Time").cast(pl.Datetime))
 
         logger.info(f"Data loaded successfully. Shape: {df.shape}")
         return df

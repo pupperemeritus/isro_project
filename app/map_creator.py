@@ -3,25 +3,23 @@ import logging.config
 import os
 from typing import Optional
 
+from logging_conf import log_config
 import numpy as np
-import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import polars as pl
 import streamlit as st
 from scipy.interpolate import griddata
 
 try:
-    logging.config.fileConfig(
-        os.path.join(os.getcwd(), "app", "logging.conf"), disable_existing_loggers=False
-    )
+    logging.config.dictConfig(log_config)
 except Exception as e:
-    logging.error("Cwd must be root of project directory")
+    logging.error(e)
 logger = logging.Logger(__name__)
 
 
-@st.cache_data
 def create_map(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     lat: str,
     lon: str,
     color: str,
@@ -36,9 +34,9 @@ def create_map(
 ) -> go.Figure:
     try:
         logger.info(f"Creating {map_type} map")
-        df.loc[:, lat] = pd.to_numeric(df[lat], errors="coerce")
-        df.loc[:, lon] = pd.to_numeric(df[lon], errors="coerce")
-        df = df.dropna(subset=[lat, lon])
+        df = df.with_columns(
+            [pl.col(lat).cast(pl.Float64), pl.col(lon).cast(pl.Float64)]
+        ).drop_nulls(subset=[lat, lon])
         logger.debug(f"Data shape after cleaning: {df.shape}")
 
         center_lat = 20.593684
@@ -46,7 +44,7 @@ def create_map(
 
         if map_type == "Scatter":
             fig = px.scatter_mapbox(
-                df,
+                df.to_pandas(),
                 lat=lat,
                 lon=lon,
                 color=color,
@@ -68,51 +66,46 @@ def create_map(
                 lon_bins = np.arange(lon_range[0], lon_range[1], bin_size)
 
                 max_s4 = []
-                for lat in lat_bins[:-1]:
-                    for lon in lon_bins[:-1]:
-                        mask = df["Latitude"].between(lat, lat + bin_size) & df[
-                            "Longitude"
-                        ].between(lon, lon + bin_size)
-                        if mask.any():
-                            max_s4.append(
-                                df.loc[mask, "S4"].max()
-                            )  # Use max instead of mean
+                for lat_val in lat_bins[:-1]:
+                    for lon_val in lon_bins[:-1]:
+                        mask = df["Latitude"].is_between(
+                            lat_val, lat_val + bin_size
+                        ) & df["Longitude"].is_between(lon_val, lon_val + bin_size)
+                        if df.filter(mask).height > 0:
+                            max_s4.append(df.filter(mask)["S4"].max())
                         else:
                             max_s4.append(np.nan)
 
-                max_s4_df = pd.DataFrame(
+                max_s4_df = pl.DataFrame(
                     {
                         "Latitude": np.repeat(lat_bins[:-1], len(lon_bins[:-1])),
                         "Longitude": np.tile(lon_bins[:-1], len(lat_bins[:-1])),
                         "S4": max_s4,
                     }
                 )
-                # Interpolate missing values
-                # Create a grid of coordinates for interpolation
-                x, y = np.meshgrid(lon_bins[:-1], lat_bins[:-1])
-                z = max_s4_df["S4"].values
 
-                # Remove NaN values for interpolation
+                # Interpolate missing values
+                x, y = np.meshgrid(lon_bins[:-1], lat_bins[:-1])
+                z = max_s4_df["S4"].to_numpy()
+
                 valid_idx = ~np.isnan(z)
                 x_valid = x.flatten()[valid_idx]
                 y_valid = y.flatten()[valid_idx]
                 z_valid = z[valid_idx]
 
-                # Perform interpolation using griddata
-                interp_method = "cubic"  # Choose interpolation method (e.g., 'linear', 'nearest', 'cubic')
+                interp_method = "cubic"
                 interp_s4 = griddata(
                     (x_valid, y_valid), z_valid, (x, y), method=interp_method
                 )
 
-                # Replace NaN values in original mean_s4_df with interpolated values
-                max_s4_df["S4"] = interp_s4.flatten()
+                max_s4_df = max_s4_df.with_columns(pl.Series("S4", interp_s4.flatten()))
                 fig = px.density_mapbox(
-                    max_s4_df,
+                    max_s4_df.to_pandas(),
                     lat="Latitude",
                     lon="Longitude",
                     z="S4",
                     radius=heatmap_size,  # Adjust the radius as needed
-                    range_color=(0,1),  # Color range
+                    range_color=(0, 1),  # Color range
                     color_continuous_scale=(
                         color_scale if color_scale else None
                     ),  # Color scale
@@ -120,7 +113,7 @@ def create_map(
                 )
             else:
                 fig = px.scatter_mapbox(
-                    df,
+                    df.to_pandas(),
                     lat=lat,
                     lon=lon,
                     color=color,

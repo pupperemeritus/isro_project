@@ -1,6 +1,5 @@
 import logging
 import logging.config
-import os
 from datetime import datetime, timedelta
 from typing import List
 
@@ -9,20 +8,20 @@ import polars as pl
 from logging_conf import log_config
 
 try:
-    logging.config.dictConfig(log_config, disable_existing_loggers=False)
+    logging.config.dictConfig(log_config)
 except Exception as e:
-    logging.error("Cwd must be root of project directory")
+    logging.error(e)
 logger = logging.Logger(__name__)
 
 
 def get_numeric_columns(df: pl.DataFrame) -> List[str]:
     logger.debug("Getting numeric columns")
-    return df.select_dtypes(include=["int64", "float64"]).columns.tolist()
+    return df.select(pl.col(pl.FLOAT_DTYPES + pl.INTEGER_DTYPES)).columns
 
 
-def get_categorical_columns(df: pd.DataFrame) -> List[str]:
+def get_categorical_columns(df: pl.DataFrame) -> List[str]:
     logger.debug("Getting categorical columns")
-    return df.select_dtypes(include=["object", "category"]).columns.tolist()
+    return df.select(pl.col(pl.CATEGORICAL_DTYPES + pl.STRING_DTYPES)).columns
 
 
 def calculate_single_lat_lon(elevation, azimuth, user_lat=17.39, user_long=78.31):
@@ -53,9 +52,10 @@ def calculate_single_lat_lon(elevation, azimuth, user_lat=17.39, user_long=78.31
 
 def add_lat_lon_to_df(df, elevation_col, azimuth_col, user_lat, user_lon):
     logger.info("Adding latitude and longitude to dataframe")
-    df["Latitude"], df["Longitude"] = calculate_lat_lon(
-        df[elevation_col], df[azimuth_col], user_lat, user_lon
+    lat, lon = calculate_lat_lon(
+        df[elevation_col].to_numpy(), df[azimuth_col].to_numpy(), user_lat, user_lon
     )
+    df = df.with_columns([pl.Series("Latitude", lat), pl.Series("Longitude", lon)])
     logger.debug("Latitude and Longitude columns added")
     return df
 
@@ -92,9 +92,9 @@ def calculate_lat_lon(elevation, azimuth, user_lat, user_long):
 def process_csv_with_lat_lon(input_file, output_file, user_lat, user_lon):
     try:
         logger.info(f"Processing CSV file: {input_file}")
-        df = pd.read_csv(input_file)
+        df = pl.read_csv(input_file)
         df = add_lat_lon_to_df(df, "Elevation", "Azimuth", user_lat, user_lon)
-        df.to_csv(output_file, index=False)
+        df.write_csv(output_file)
         logger.info(f"CSV file with latitude and longitude saved to {output_file}")
     except Exception as e:
         logger.exception(f"Error processing CSV file: {str(e)}")

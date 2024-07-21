@@ -2,25 +2,24 @@ import logging
 import logging.config
 import os
 
-import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 from logging_conf import log_config
 
 try:
-    logging.config.dictConfig(log_config, disable_existing_loggers=False)
+    logging.config.dictConfig(log_config)
 except Exception as e:
-    logging.error("Cwd must be root of project directory")
+    logging.error(e)
 logger = logging.Logger(__name__)
 
 
-def create_time_series_plot(df: pd.DataFrame, svid: int) -> go.Figure:
+def create_time_series_plot(df: pl.DataFrame, svid: int) -> go.Figure:
     try:
         logger.info(f"Creating time series plot for SVID {svid}")
-        df_svid = df[df["SVID"] == svid]
+        df_svid = df.filter(pl.col("SVID") == svid)
         fig = px.scatter(
-            df_svid,
+            df_svid.to_pandas(),  # Convert to pandas for Plotly
             x="IST_Time",
             height=1024,
             y="S4",
@@ -34,11 +33,11 @@ def create_time_series_plot(df: pd.DataFrame, svid: int) -> go.Figure:
         return go.Figure()
 
 
-def create_skyplot(df: pd.DataFrame) -> go.Figure:
+def create_skyplot(df: pl.DataFrame) -> go.Figure:
     try:
         logger.info("Creating skyplot")
         fig = px.scatter_polar(
-            df,
+            df.to_pandas(),  # Convert to pandas for Plotly
             r="Elevation",
             theta="Azimuth",
             color="S4",

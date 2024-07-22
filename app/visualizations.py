@@ -19,11 +19,13 @@ def create_time_series_plot(df: pl.DataFrame, svid: int) -> go.Figure:
         logger.info(f"Creating time series plot for SVID {svid}")
         df_svid = df.filter(pl.col("SVID") == svid)
         fig = px.scatter(
-            df_svid.to_pandas(),  # Convert to pandas for Plotly
+            df_svid.to_pandas(),
             x="IST_Time",
             height=1024,
             y="S4",
+            color="S4",
             title=f"S4 Time Series for SVID {svid}",
+            color_continuous_scale=px.colors.get_colorscale("Jet"),
             range_color=(0, 1),
         )
         logger.debug(f"Time series plot created with {len(df_svid)} points")
@@ -43,6 +45,7 @@ def create_skyplot(df: pl.DataFrame) -> go.Figure:
             color="S4",
             size="S4",
             height=1024,
+            color_continuous_scale=px.colors.get_colorscale("Jet"),
             range_color=(0, 1),
             hover_data=["SVID", "IST_Time"],
             title="Skyplot with S4 Values",

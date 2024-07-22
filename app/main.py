@@ -310,10 +310,6 @@ def main():
                             )
 
                 case "Time Series":
-                    selected_svid = st.sidebar.selectbox(
-                        "Select SVID for Time Series",
-                        sorted(filtered_df["SVID"].unique()),
-                    )
                     filtered_df = filter_dataframe(
                         df,
                         None,
@@ -323,7 +319,7 @@ def main():
                         s4_threshold,
                     )
                     time_series_fig = create_time_series_plot(
-                        filtered_df, selected_svid
+                        filtered_df, svid
                     )
 
                     with viz_container.container():

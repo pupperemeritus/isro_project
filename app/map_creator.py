@@ -27,7 +27,7 @@ def create_map(
     size: Optional[str],
     map_type: str,
     map_style: str,
-    zoom: float = 4.0,
+    zoom: float = 3.6,
     marker_size: int = 5,
     heatmap_size: int = 10,
     color_scale: Optional[str] = None,

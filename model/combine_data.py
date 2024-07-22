@@ -1,14 +1,24 @@
 import os
 import sys
 
+
 import polars as pl
+
+
+def find_csv_files(directory: str):
+    csv_files = []
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if file.endswith(".csv"):
+                csv_files.append(os.path.join(root, file))
+    return csv_files
 
 
 def combine_data_into_ipc(
     csv_directory: str = sys.argv[1], output_file: str = sys.argv[2]
 ):
     # Get all CSV files in the directory
-    csv_files = [f for f in os.listdir(csv_directory) if f.endswith(".csv")]
+    csv_files = find_csv_files(csv_directory)
 
     # Read and concatenate CSV files
     dfs = [pl.read_csv(os.path.join(csv_directory, file)) for file in csv_files]
@@ -26,7 +36,7 @@ def combine_data_into_parquet(
     csv_directory: str = sys.argv[1], output_file: str = sys.argv[2]
 ):
     # Get all CSV files in the directory
-    csv_files = [f for f in os.listdir(csv_directory) if f.endswith(".csv")]
+    csv_files = find_csv_files(csv_directory)
 
     # Read and concatenate CSV files
     dfs = [pl.read_csv(os.path.join(csv_directory, file)) for file in csv_files]

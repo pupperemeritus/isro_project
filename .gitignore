@@ -117,3 +117,6 @@ testdata.csv
 
 logs
 data
+lightning_logs
+tb_logs
+checkpoints

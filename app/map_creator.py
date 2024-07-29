@@ -29,7 +29,7 @@ def create_map(
     map_style: str,
     zoom: float = 3.6,
     marker_size: int = 5,
-    heatmap_size: int = 10,
+    heatmap_size: int = 20,
     color_scale: Optional[str] = None,
     bin_heatmap: bool = False,
 ) -> go.Figure:
@@ -53,7 +53,12 @@ def create_map(
                     height=1024,
                     range_color=(0, 1),
                     color_continuous_scale=color_scale if color_scale else None,
-                    hover_data=["SVID", "IST_Time", "S4"],
+                    hover_data=[
+                        "SVID",
+                        "IST_Time",
+                        "S4",
+                        "Vertical Scintillation Amplitude",
+                    ],
                     title="Scatter Mapbox for S4 Values",
                 )
                 fig.update_traces(marker=dict(size=marker_size))
@@ -77,7 +82,9 @@ def create_map(
                             ) & df["Longitude"].is_between(lon_val, lon_val + bin_size)
                             filtered = df.filter(mask)
                             if filtered.height > 0:
-                                binned_data[i, j] = filtered["S4"].max()
+                                binned_data[i, j] = filtered[
+                                    "Vertical Scintillation Amplitude"
+                                ].max()
 
                     # Create meshgrid for interpolation
                     x, y = np.meshgrid(
@@ -113,10 +120,12 @@ def create_map(
                             colorscale=color_scale if color_scale else "Viridis",
                             zmin=0,
                             zmax=1,
-                            colorbar=dict(title="S4"),
-                            hovertext=[f"S4: {s4:.2f}" for s4 in grid_z.flatten()],
+                            colorbar=dict(title="Vertical Scintillation Amplitude"),
+                            hovertext=[
+                                f"Vertical S4: {s4:.2f}" for s4 in grid_z.flatten()
+                            ],
                             hoverinfo="text+lon+lat",
-                            hovertemplate="S4: %{z:.2f}\nLatitude: %{lat:.0f}\nLong: %{lon:.0f}<extra></extra>",
+                            hovertemplate="Vertical S4: %{z:.2f}\nLatitude: %{lat:.0f}\nLong: %{lon:.0f}<extra></extra>",
                         )
                     )
 
@@ -136,13 +145,20 @@ def create_map(
                         lat=lat,
                         lon=lon,
                         color=color,
-                        size=color,  # Use S4 for both color and size
+                        size=df["Vertical Scintillation Amplitude"]
+                        .fill_nan(0)
+                        .to_numpy()
+                        / 2,  # Use S4 for both color and size
                         size_max=heatmap_size,
                         height=1024,
                         title="Scatter Mapbox for S4 Values",
                         range_color=(0, 1),
                         color_continuous_scale=color_scale if color_scale else None,
-                        hover_data=["SVID", "IST_Time", "S4"],
+                        hover_data=[
+                            "SVID",
+                            "IST_Time",
+                            "Vertical Scintillation Amplitude",
+                        ],
                     )
             case "":
                 logger.error(f"Unsupported map type: {map_type}")

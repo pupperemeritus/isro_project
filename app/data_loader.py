@@ -10,7 +10,7 @@ import polars as pl
 import streamlit as st
 from logging_conf import log_config
 from streamlit.runtime.uploaded_file_manager import UploadedFile
-from utils import add_lat_lon_to_df, gps_to_ist
+from utils import add_lat_lon_to_df, gps_to_ist, slant_to_vertical
 
 warnings.filterwarnings("ignore")
 
@@ -97,6 +97,7 @@ def load_data(file: UploadedFile) -> Optional[pl.DataFrame]:
             ]
         )
         df = df.with_columns(pl.col("IST_Time").cast(pl.Datetime))
+        df = slant_to_vertical(df)
 
         logger.info(f"Data loaded successfully. Shape: {df.shape}")
         return df

@@ -14,6 +14,43 @@ except Exception as e:
 logger = logging.Logger(__name__)
 
 
+def slant_to_vertical(df: pl.DataFrame):
+    e_rad = df["Elevation"].to_numpy()
+    radius_earth_km = 6378
+    height_ipp_km = 350
+
+    p = (
+        df[
+            "p on Sig1, spectral slope of detrended phase in the 0.1 to 25Hz range (dimensionless)"
+        ]
+        .cast(pl.Float64)
+        .to_numpy()
+    )
+
+    amplitude_scintillation_slant = df["S4"].to_numpy()
+
+    term_1 = radius_earth_km * np.cos(e_rad) / (radius_earth_km + height_ipp_km)
+    term_2 = np.sqrt(1 - term_1**2)
+    term_3 = (1 / term_2) ** (p + 0.25)
+    vertical_scintillation_amplitude = pl.Series(
+        "Vertical Scintillation Amplitude", amplitude_scintillation_slant / term_3
+    )
+
+    phase_scintillation_rad = df[
+        "Phi60 on Sig1, 60-second phase sigma (radians)"
+    ].to_numpy()
+
+    term_4 = (1 / term_2) ** (0.5)
+    vertical_scintillation_phase = pl.Series(
+        "Vertical Scintillation Phase", phase_scintillation_rad / term_4
+    )
+
+    df.insert_column(-1, vertical_scintillation_amplitude)
+    df.insert_column(-1, vertical_scintillation_phase)
+
+    return df
+
+
 def get_numeric_columns(df: pl.DataFrame) -> List[str]:
     logger.debug("Getting numeric columns")
     return df.select(pl.col(pl.FLOAT_DTYPES + pl.INTEGER_DTYPES)).columns

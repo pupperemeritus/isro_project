@@ -3,14 +3,16 @@ import logging.config
 import os
 from typing import Optional
 
-from logging_conf import log_config
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import matplotlib.pyplot as plt
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import polars as pl
 import streamlit as st
+from logging_conf import log_config
 from scipy.interpolate import griddata
-
 
 try:
     logging.config.dictConfig(log_config)
@@ -170,9 +172,90 @@ def create_map(
                 center=dict(lat=center_lat, lon=center_lon),
                 zoom=zoom,  # Adjust this value to get the desired initial zoom level
             ),
+            mapbox_layers=[
+                {
+                    "below": "traces",
+                    "sourcetype": "raster",
+                    "source": [
+                        "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}"
+                    ],
+                }
+            ],
         )
         logger.info(f"Map created successfully. Type: {map_type}")
         return fig
     except Exception as e:
         logger.exception(f"Error creating map: {str(e)}")
         return go.Figure()
+
+
+def create_contour_map(
+    df: pl.DataFrame,
+    lat: str,
+    lon: str,
+    color: str,
+    color_scale: str = "jet",
+):
+    df = df.drop_nulls(subset=[lat, lon, color])
+
+    # Convert Polars Series to NumPy arrays
+    points = np.array([df[lat].to_numpy(), df[lon].to_numpy()]).T
+    values = df[color].to_numpy()
+    values = np.nan_to_num(values, nan=0.0)
+
+    # Define grid for interpolation
+    grid_lat, grid_lon = np.mgrid[
+        df[lat].min() : df[lat].max() : 100j,
+        df[lon].min() : df[lon].max() : 100j,
+    ]
+
+    # Flatten the grid for comparison
+    grid_points = np.array([grid_lat.flatten(), grid_lon.flatten()]).T
+
+    # Find grid points that are not in the original data points
+    unique_points = np.unique(points, axis=0)
+    mask = np.all(np.isin(grid_points, unique_points))
+    xi = grid_points[~mask].flatten()
+
+    # Interpolate data onto the grid
+    grid_values = griddata(
+        points,
+        values,
+        (grid_lat, grid_lon),
+        method="linear",
+        rescale=True,
+        fill_value=0.0,
+    )
+
+    # Create the plot
+    fig, ax = plt.subplots(
+        figsize=(12, 10), subplot_kw={"projection": ccrs.PlateCarree()}
+    )
+
+    # Add features to the map
+    ax.add_feature(cfeature.LAND)
+    ax.add_feature(cfeature.COASTLINE)
+    ax.add_feature(cfeature.BORDERS)
+    ax.add_feature(cfeature.LAKES, edgecolor="black")
+    ax.add_feature(cfeature.RIVERS)
+
+    # Add contour plot
+    cont = ax.contourf(
+        grid_lon[0, :],
+        grid_lat[:, 0],
+        grid_values,
+        cmap=color_scale,
+        levels=np.linspace(0, 1, 20),  # Ensure levels are within [0, 1]
+        transform=ccrs.PlateCarree(),
+    )
+    cbar = fig.colorbar(cont, ax=ax, orientation="vertical", pad=0.1)
+    cbar.set_label(color)  # Set colorbar label to reflect the color parameter
+
+    # Set extent and title
+    ax.set_extent(
+        [df[lon].min(), df[lon].max(), df[lat].min(), df[lat].max()],
+        crs=ccrs.PlateCarree(),
+    )
+    ax.set_title("Contour Map of " + color)
+
+    return fig

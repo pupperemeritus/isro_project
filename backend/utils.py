@@ -1,9 +1,13 @@
+import io
 import logging
 import logging.config
 from datetime import datetime, timedelta
 from typing import List
 
+import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
+import plotly.io as pio
 import polars as pl
 from logging_conf import log_config
 
@@ -101,7 +105,7 @@ def gps_to_ist(gps_week, gps_seconds):
     logger.debug(f"Converting GPS time to IST: week={gps_week}, seconds={gps_seconds}")
     gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
     gps_time = gps_epoch + timedelta(weeks=int(gps_week), seconds=float(gps_seconds))
-    ist_time = gps_time + timedelta(hours=5,minutes=30)
+    ist_time = gps_time + timedelta(hours=5, minutes=30)
     return ist_time
 
 
@@ -136,3 +140,60 @@ def process_csv_with_lat_lon(input_file, output_file, user_lat, user_lon):
         logger.info(f"CSV file with latitude and longitude saved to {output_file}")
     except Exception as e:
         logger.exception(f"Error processing CSV file: {str(e)}")
+
+
+def find_time_window(target_datetime, window_minutes=10):
+    window_start = target_datetime + timedelta(minutes=0)
+    window_end = target_datetime + timedelta(minutes=window_minutes)
+    return window_start, window_end
+
+
+def filter_dataframe(
+    df: pl.DataFrame,
+    time_window,
+    svid,
+    latitude_range,
+    longitude_range,
+    s4_threshold,
+):
+    filter_conditions = [
+        pl.col("SVID").is_in(svid),
+        pl.col("Latitude").is_between(latitude_range[0], latitude_range[1]),
+        pl.col("Longitude").is_between(longitude_range[0], longitude_range[1]),
+        pl.col("Vertical Scintillation Amplitude") >= s4_threshold,
+    ]
+
+    if time_window:
+        window_start, window_end = time_window
+        filter_conditions.extend(
+            [pl.col("IST_Time") >= window_start, pl.col("IST_Time") <= window_end]
+        )
+
+    # Apply all filter conditions
+    for condition in filter_conditions:
+        df = df.filter(condition)
+
+    return df
+
+
+def find_nearest_time(
+    target_datetime: datetime, available_datetimes: pl.Series
+) -> datetime:
+    time_diffs = (available_datetimes - target_datetime).abs()
+    nearest_index = time_diffs.arg_min()
+    return available_datetimes[nearest_index]
+
+
+def save_matplotlib_figure_as_png(fig: plt.Figure):
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight")
+    buffer.seek(0)
+    return buffer
+
+
+# Function to save Plotly figure as PNG
+def save_plotly_figure_as_png(fig: go.Figure):
+    buffer = io.BytesIO()
+    pio.write_image(fig, buffer, format="png")
+    buffer.seek(0)
+    return buffer

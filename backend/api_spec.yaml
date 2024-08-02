@@ -1,0 +1,251 @@
+openapi: 3.0.0
+info:
+    title: S4 Data Plotter API
+    version: 1.0.0
+    description: API for retrieving and visualizing S4 data for the Dynamic S4 Data Plotter application.
+
+servers:
+    - url: http://localhost:8000/v1
+      description: Development server
+
+paths:
+    /files:
+        get:
+            summary: Retrieve available data files
+            description: Returns a list of all available S4 data files for analysis.
+            responses:
+                "200":
+                    description: Successful response
+                    content:
+                        application/json:
+                            schema:
+                                type: array
+                                items:
+                                    type: string
+                                example: ["file1.txt", "file2.txt"]
+
+    /data_preview/{file_name}:
+        get:
+            summary: Get data preview
+            description: Returns a preview of the selected data file.
+            parameters:
+                - in: path
+                  name: file_name
+                  required: true
+                  schema:
+                      type: string
+                  description: Name of the file to preview
+            responses:
+                "200":
+                    description: Successful response
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    preview:
+                                        type: array
+                                        items:
+                                            type: object
+                                        description: Array of data objects representing the preview rows
+
+    /filtered_data:
+        get:
+            summary: Get filtered S4 data
+            description: Returns filtered S4 data based on provided parameters.
+            parameters:
+                - in: query
+                  name: file_name
+                  required: true
+                  schema:
+                      type: string
+                  description: Name of the file to analyze
+                - in: query
+                  name: selected_date
+                  required: true
+                  schema:
+                      type: string
+                      format: date
+                  description: Selected date for filtering (YYYY-MM-DD)
+                - in: query
+                  name: selected_time
+                  required: true
+                  schema:
+                      type: string
+                      format: time
+                  description: Selected time for filtering (HH:MM:SS)
+                - in: query
+                  name: window
+                  schema:
+                      type: integer
+                      minimum: 1
+                      maximum: 30
+                      default: 10
+                  description: Time window in minutes
+                - in: query
+                  name: latitude_range
+                  schema:
+                      type: string
+                      pattern: '^-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?$'
+                  description: Latitude range (min,max)
+                - in: query
+                  name: longitude_range
+                  schema:
+                      type: string
+                      pattern: '^-?\\d+(\\.\\d+)?,-?\\d+(\\.\\d+)?$'
+                  description: Longitude range (min,max)
+                - in: query
+                  name: s4_threshold
+                  schema:
+                      type: number
+                      minimum: 0
+                      maximum: 1
+                      default: 0
+                  description: S4 threshold value
+                - in: query
+                  name: svid
+                  schema:
+                      type: array
+                      items:
+                          type: integer
+                  description: List of SVID values to include
+            responses:
+                "200":
+                    description: Successful response
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    data:
+                                        type: array
+                                        items:
+                                            type: object
+                                        description: Array of filtered S4 data objects
+                                    svid_options:
+                                        type: array
+                                        items:
+                                            type: integer
+                                        description: List of available SVID options
+
+    /visualization/{viz_type}:
+        get:
+            summary: Get visualization data
+            description: Returns data for the requested visualization type.
+            parameters:
+                - in: path
+                  name: viz_type
+                  required: true
+                  schema:
+                      type: string
+                      enum: [Map, TimeSeries, Skyplot]
+                  description: Type of visualization
+                - in: query
+                  name: file_name
+                  required: true
+                  schema:
+                      type: string
+                  description: Name of the file to visualize
+                - in: query
+                  name: filtered_data_params
+                  required: true
+                  schema:
+                      type: object
+                  description: JSON object containing all filtered data parameters
+                - in: query
+                  name: map_type
+                  schema:
+                      type: string
+                      enum: [Scatter/Heatmap, TEC]
+                  description: Type of map visualization (required for Map viz_type)
+                - in: query
+                  name: map_style
+                  schema:
+                      type: string
+                  description: Style of the map (required for Map viz_type)
+                - in: query
+                  name: marker_size
+                  schema:
+                      type: integer
+                  description: Size of markers for Scatter/Heatmap
+                - in: query
+                  name: heatmap_size
+                  schema:
+                      type: integer
+                  description: Size of heatmap for Scatter/Heatmap
+                - in: query
+                  name: color_scale
+                  schema:
+                      type: string
+                  description: Color scale for the visualization
+                - in: query
+                  name: bin_heatmap
+                  schema:
+                      type: boolean
+                  description: Whether to bin the heatmap
+                - in: query
+                  name: selected_svid
+                  schema:
+                      type: integer
+                  description: Selected SVID for Time Series visualization
+            responses:
+                "200":
+                    description: Successful response
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                properties:
+                                    figure:
+                                        type: object
+                                        description: Plotly or Matplotlib figure data
+                                    png_data:
+                                        type: string
+                                        format: binary
+                                        description: PNG image data for download
+
+components:
+    schemas:
+        FilteredDataParams:
+            type: object
+            properties:
+                file_name:
+                    type: string
+                selected_date:
+                    type: string
+                    format: date
+                selected_time:
+                    type: string
+                    format: time
+                window:
+                    type: integer
+                latitude_range:
+                    type: string
+                longitude_range:
+                    type: string
+                s4_threshold:
+                    type: number
+                svid:
+                    type: array
+                    items:
+                        type: integer
+
+        PlotlyVisualization:
+            type: object
+            properties:
+                data:
+                    type: array
+                    items:
+                        type: object
+                    description: Plotly trace data
+                layout:
+                    type: object
+                    description: Plotly layout data
+
+        MatplotlibVisualization:
+            type: object
+            properties:
+                image:
+                    type: string
+                    format: base64
+                    description: Base64-encoded image data

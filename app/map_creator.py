@@ -45,26 +45,7 @@ def create_map(
         center_lat = 20.593684
         center_lon = 78.96288
         match map_type:
-            case "Scatter":
-                fig = px.scatter_mapbox(
-                    df.to_pandas(),
-                    lat=lat,
-                    lon=lon,
-                    color=color,
-                    size=size if size else None,
-                    height=1024,
-                    range_color=(0, 1),
-                    color_continuous_scale=color_scale if color_scale else None,
-                    hover_data=[
-                        "SVID",
-                        "IST_Time",
-                        "S4",
-                        "Vertical Scintillation Amplitude",
-                    ],
-                    title="Scatter Mapbox for S4 Values",
-                )
-                fig.update_traces(marker=dict(size=marker_size))
-            case "Heatmap":
+            case "Scatter/Heatmap":
                 if bin_heatmap:
                     # Define bin size and range
                     bin_size = 1
@@ -162,7 +143,7 @@ def create_map(
                             "Vertical Scintillation Amplitude",
                         ],
                     )
-            case "":
+            case _:
                 logger.error(f"Unsupported map type: {map_type}")
                 return go.Figure()
 

@@ -2,7 +2,7 @@ import io
 import logging
 import logging.config
 import random
-import threading
+import os
 import time
 from datetime import datetime, timedelta
 
@@ -93,16 +93,20 @@ def main():
     )
     st.title("Dynamic S4 Data Plotter")
 
-    uploaded_file = st.sidebar.file_uploader(
-        "Choose a file", type=[".arrow", ".csv", ".parquet"], key="uploaded_file"
-    )
+    data_dir = os.path.join(os.getcwd(), "data/")
+    available_files = os.listdir(data_dir)
+    available_files_path = [os.path.join(data_dir, avl_file) for avl_file in available_files]
 
-    if uploaded_file is not None:
+    current_file_selection = st.sidebar.selectbox("Select file", options=available_files)
+    current_index =  available_files.index(current_file_selection)
+    current_file = io.FileIO(available_files_path[current_index])
+
+    if current_file is not None:
         viz_container = st.empty()
         data_container = st.empty()
         download_container = st.empty()
 
-        df = load_data(uploaded_file)
+        df = load_data(current_file)
         if df is not None and not df.is_empty():
             with data_container.container():
                 st.write("Data Preview:")
@@ -191,7 +195,7 @@ def main():
             match viz_type:
                 case "Map":
                     map_type = st.sidebar.selectbox(
-                        "Select Map Type", ["Scatter", "Heatmap", "TEC"], index=1
+                        "Select Map Type", ["Scatter/Heatmap", "TEC"], index=0
                     )
                     map_style = st.sidebar.selectbox(
                         "Select Map Style",
@@ -216,12 +220,12 @@ def main():
                     else:
                         marker_size = (
                             st.sidebar.slider("Marker Size", 1, 20, 10)
-                            if map_type == "Scatter"
+                            if map_type == "Scatter/Heatmap"
                             else None
                         )
                         heatmap_size = (
                             st.sidebar.slider("Heatmap Size", 1, 80, 40)
-                            if map_type == "Heatmap"
+                            if map_type == "Scatter/Heatmap"
                             else None
                         )
                         color_scale = st.sidebar.selectbox(
@@ -230,7 +234,7 @@ def main():
 
                         bin_heatmap = (
                             st.sidebar.toggle("Bin heatmap")
-                            if map_type == "Heatmap"
+                            if map_type == "Scatter/Heatmap"
                             else None
                         )
 

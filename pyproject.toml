@@ -23,8 +23,8 @@ scikit-learn = "^1.5.1"
 nbdime = "^4.0.1"
 cartopy = "^0.23.0"
 matplotlib = "^3.9.1"
-mpld3 = "^0.5.10"
 kaleido = "0.2.1"
+streamlit = "^1.37.0"
 
 
 [build-system]

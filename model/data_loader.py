@@ -220,28 +220,38 @@ class IonosphereDataset(Dataset):
     def __init__(
         self,
         dataframe: pl.DataFrame,
-        target_column="Vertical Scintillation Amplitude",
-        sequence_length=60,
-        prediction_horizon=1,
-        missing_data="closest",
-        max_gap=5,
-        stride=1,
+        sequence_length: int = 60,
+        prediction_horizon: int = 1,
+        missing_data: str = "closest",
+        max_gap: int = 5,
+        stride: int = 1,
+        null_threshold: float = 0.4,
     ):
+        column_iter = dataframe.describe().iter_columns()
+        null_ratios: List[float] = []
+        column_names: List[str] = []
+
+        for col in column_iter:
+            if col.name != "statistic":
+                null_ratios.append(col[1] / col[0])  # null_count / count
+                column_names.append(col.name)
+        null_ratios = np.array(null_ratios)
+        column_names = np.array(column_names)
+        column_mask = null_ratios >= null_threshold
+        droppable_columns = column_names[column_mask]
+        self.dataframe = dataframe.drop(droppable_columns)
+
+        self.dataframe = self.dataframe.fill_null(strategy="zero")
+        self.features = dataframe.drop(["IST_Time", "Class"], axis=1).to_numpy()
+        self.target = dataframe["Class"].to_numpy()
+        self.timestamps = dataframe["IST_Time"].to_numpy()
+        self.minmaxScaler = MinMaxScaler()
+        self.target = self.minmaxScaler.fit_transform(self.target.reshape(-1, 1))
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
         self.missing_data = missing_data
         self.max_gap = max_gap
         self.stride = stride
-
-        dataframe = dataframe.sort("IST_Time")
-        self.scaler = StandardScaler()
-        self.features = self.scaler.fit_transform(
-            dataframe.drop(["IST_Time", target_column, "S4"]).to_numpy()
-        )
-        self.target = dataframe[target_column].to_numpy()
-        self.timestamps = dataframe["IST_Time"].to_numpy()
-        self.minmaxScaler = MinMaxScaler()
-        self.target = self.minmaxScaler.fit_transform(self.target.reshape(-1, 1))
 
     def __len__(self):
         return (
@@ -275,6 +285,7 @@ class IonosphereDataset(Dataset):
     def _get_closest_data(self, time_mask, start_time, end_time):
         available_times = self.timestamps[time_mask]
         available_features = self.features[time_mask]
+
         full_sequence_times = np.arange(
             start_time, end_time + np.timedelta64(1, "m"), np.timedelta64(1, "m")
         )
@@ -284,6 +295,7 @@ class IonosphereDataset(Dataset):
 
         closest_indices = np.searchsorted(available_times, full_sequence_times)
         closest_indices = np.clip(closest_indices, 0, len(available_times) - 1)
+
         return available_features[closest_indices]
 
     def _interpolate_data(self, time_mask, start_time, end_time):
@@ -297,93 +309,38 @@ class IonosphereDataset(Dataset):
         available_times_num = (
             self.timestamps[time_mask] - start_time
         ) / np.timedelta64(1, "m")
+
         full_sequence_times_num = (full_sequence_times - start_time) / np.timedelta64(
             1, "m"
         )
 
-        feature_seq = np.zeros((len(full_sequence_times), self.features.shape[1]))
-        for i in range(self.features.shape[1]):
-            f = interp1d(
-                available_times_num,
-                self.features[time_mask, i],
-                kind="linear",
-                bounds_error=False,
-                fill_value="extrapolate",
-            )
-            feature_seq[:, i] = f(full_sequence_times_num)
+        available_features = self.features[time_mask]
 
-        return feature_seq
+        feature_interp = interp1d(available_times_num, available_features)
+        return feature_interp(full_sequence_times_num)
 
 
-def data_generator(
-    df: pl.DataFrame, batch_size: int, sequence_length: int, prediction_horizon: int
-):
-    total_length = len(df) - sequence_length - prediction_horizon + 1
-    indices = np.arange(total_length)
-    np.random.shuffle(indices)
-
-    for i in range(0, total_length, batch_size):
-        batch_indices = indices[i : i + batch_size]
-        yield df.slice(
-            batch_indices.min(),
-            batch_indices.max()
-            - batch_indices.min()
-            + sequence_length
-            + prediction_horizon,
-        )
+def load_data(file_name: str):
+    """Load Ionosphere data from a CSV file"""
+    dataframe = pd.read_csv(file_name)
+    return dataframe
 
 
-def prepare_data_loaders(
-    file_path,
-    batch_size=32,
-    sequence_length=60,
-    prediction_horizon=1,
-    test_size=0.2,
-    val_size=0.1,
-    missing_data="closest",
-    max_gap=5,
-    stride=1,
-):
-    df = load_data(file_path)
-    if df is None:
-        raise ValueError("Failed to load data")
+def prepare_dataset(dataframe: pd.DataFrame):
+    """Prepare dataset for PyTorch model training"""
+    dataset = IonosphereDataset(dataframe)
+    train_loader, val_loader, test_loader, minmaxScaler = prepare_data_loaders(dataset)
+    return train_loader, val_loader, test_loader, minmaxScaler
 
-    train_val_df, test_df = train_test_split(df, test_size=test_size, random_state=42)
-    train_df, val_df = train_test_split(
-        train_val_df, test_size=val_size / (1 - test_size), random_state=42
-    )
 
-    train_dataset = IonosphereDataset(
-        train_df,
-        sequence_length=sequence_length,
-        prediction_horizon=prediction_horizon,
-        missing_data=missing_data,
-        max_gap=max_gap,
-        stride=stride,
-    )
-    val_dataset = IonosphereDataset(
-        val_df,
-        sequence_length=sequence_length,
-        prediction_horizon=prediction_horizon,
-        missing_data=missing_data,
-        max_gap=max_gap,
-        stride=stride,
-    )
-    test_dataset = IonosphereDataset(
-        test_df,
-        sequence_length=sequence_length,
-        prediction_horizon=prediction_horizon,
-        missing_data=missing_data,
-        max_gap=max_gap,
-        stride=stride,
-    )
+def prepare_data_loaders(dataset: IonosphereDataset):
+    """Prepare PyTorch data loaders for training and testing"""
+    batch_size = 32
 
-    def collate_fn(batch):
-        batch = list(filter(lambda x: x is not None, batch))
-        return torch.utils.data.dataloader.default_collate(batch)
+    collate_fn = lambda batch: torch.utils.data.dataloader.default_collate(batch)
 
     train_loader = DataLoader(
-        train_dataset,
+        dataset,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
@@ -391,17 +348,9 @@ def prepare_data_loaders(
         pin_memory=True,
         persistent_workers=True,
     )
+
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-    test_loader = DataLoader(
-        test_dataset,
+        dataset,
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
@@ -410,4 +359,14 @@ def prepare_data_loaders(
         persistent_workers=True,
     )
 
-    return train_loader, val_loader, test_loader, train_dataset.minmaxScaler
+    test_loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=4,
+        pin_memory=True,
+        persistent_workers=True,
+    )
+
+    return train_loader, val_loader, test_loader

@@ -320,19 +320,6 @@ class IonosphereDataset(Dataset):
         return feature_interp(full_sequence_times_num)
 
 
-def load_data(file_name: str):
-    """Load Ionosphere data from a CSV file"""
-    dataframe = pd.read_csv(file_name)
-    return dataframe
-
-
-def prepare_dataset(dataframe: pd.DataFrame):
-    """Prepare dataset for PyTorch model training"""
-    dataset = IonosphereDataset(dataframe)
-    train_loader, val_loader, test_loader, minmaxScaler = prepare_data_loaders(dataset)
-    return train_loader, val_loader, test_loader, minmaxScaler
-
-
 def prepare_data_loaders(dataset: IonosphereDataset):
     """Prepare PyTorch data loaders for training and testing"""
     batch_size = 32

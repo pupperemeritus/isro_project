@@ -65,9 +65,7 @@ def create_map(
                             ) & df["Longitude"].is_between(lon_val, lon_val + bin_size)
                             filtered = df.filter(mask)
                             if filtered.height > 0:
-                                binned_data[i, j] = filtered[
-                                    "Vertical Scintillation Amplitude"
-                                ].max()
+                                binned_data[i, j] = filtered["Vertical S4"].max()
 
                     # Create meshgrid for interpolation
                     x, y = np.meshgrid(
@@ -103,7 +101,7 @@ def create_map(
                             colorscale=color_scale if color_scale else "Viridis",
                             zmin=0,
                             zmax=1,
-                            colorbar=dict(title="Vertical Scintillation Amplitude"),
+                            colorbar=dict(title="Vertical S4"),
                             hovertext=[
                                 f"Vertical S4: {s4:.2f}" for s4 in grid_z.flatten()
                             ],
@@ -128,9 +126,7 @@ def create_map(
                         lat=lat,
                         lon=lon,
                         color=color,
-                        size=df["Vertical Scintillation Amplitude"]
-                        .fill_nan(0)
-                        .to_numpy()
+                        size=df["Vertical S4"].fill_nan(0).to_numpy()
                         / 2,  # Use S4 for both color and size
                         size_max=heatmap_size,
                         height=1024,
@@ -140,7 +136,7 @@ def create_map(
                         hover_data=[
                             "SVID",
                             "IST_Time",
-                            "Vertical Scintillation Amplitude",
+                            "Vertical S4",
                         ],
                     )
             case _:

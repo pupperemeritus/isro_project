@@ -45,7 +45,7 @@ def filter_dataframe(
         pl.col("SVID").is_in(svid),
         pl.col("Latitude").is_between(latitude_range[0], latitude_range[1]),
         pl.col("Longitude").is_between(longitude_range[0], longitude_range[1]),
-        pl.col("Vertical Scintillation Amplitude") >= s4_threshold,
+        pl.col("Vertical S4") >= s4_threshold,
     ]
 
     if time_window:

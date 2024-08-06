@@ -33,7 +33,7 @@ def slant_to_vertical(df: pl.DataFrame):
     term_2 = np.sqrt(1 - term_1**2)
     term_3 = (1 / term_2) ** (p + 0.25)
     vertical_scintillation_amplitude = pl.Series(
-        "Vertical Scintillation Amplitude", amplitude_scintillation_slant / term_3
+        "Vertical S4", amplitude_scintillation_slant / term_3
     )
 
     phase_scintillation_rad = df[
@@ -101,7 +101,7 @@ def gps_to_ist(gps_week, gps_seconds):
     logger.debug(f"Converting GPS time to IST: week={gps_week}, seconds={gps_seconds}")
     gps_epoch = datetime(1980, 1, 6, 0, 0, 0)
     gps_time = gps_epoch + timedelta(weeks=int(gps_week), seconds=float(gps_seconds))
-    ist_time = gps_time + timedelta(hours=5,minutes=30)
+    ist_time = gps_time + timedelta(hours=5, minutes=30)
     return ist_time
 
 

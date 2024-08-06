@@ -4,8 +4,7 @@ import logging.config
 import time
 import warnings
 from datetime import datetime, timedelta
-from functools import lru_cache
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 import polars as pl
@@ -74,7 +73,6 @@ def gps_to_ist(gps_week: int, gps_seconds: int):
     return ist_time
 
 
-@lru_cache(maxsize=None)
 def cached_gps_to_ist(gps_week: int, gps_seconds: int):
     return gps_to_ist(gps_week, gps_seconds)
 
@@ -122,7 +120,7 @@ def slant_to_vertical(df: pl.DataFrame):
     term_2 = np.sqrt(1 - term_1**2)
     term_3 = (1 / term_2) ** (p + 0.25)
     vertical_scintillation_amplitude = pl.Series(
-        "Vertical Scintillation Amplitude", amplitude_scintillation_slant / term_3
+        "Vertical S4", amplitude_scintillation_slant / term_3
     )
 
     phase_scintillation_rad = df[
@@ -220,7 +218,7 @@ class IonosphereDataset(Dataset):
     def __init__(
         self,
         dataframe: pl.DataFrame,
-        target_column="Vertical Scintillation Amplitude",
+        target_column="Vertical S4",
         sequence_length=60,
         prediction_horizon=1,
         missing_data="closest",

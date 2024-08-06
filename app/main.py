@@ -71,7 +71,7 @@ def find_nearest_time(
 
 def save_matplotlib_figure_as_png(fig: plt.Figure):
     buffer = io.BytesIO()
-    fig.savefig(buffer, format='png', bbox_inches='tight')
+    fig.savefig(buffer, format="png", bbox_inches="tight")
     buffer.seek(0)
     return buffer
 
@@ -84,30 +84,59 @@ def save_plotly_figure_as_png(fig: go.Figure):
     return buffer
 
 
+def create_fig(df, viz_type, **kwargs):
+    if viz_type == "Map":
+        map_type = kwargs.get("map_type", "Scatter/Heatmap")
+        map_fig = None
+        if map_type == "TEC":
+            map_fig = create_contour_map(
+                df,
+                lat="Latitude",
+                lon="Longitude",
+                color="Vertical S4",
+            )
+        elif map_type == "Scatter/Heatmap":
+            map_fig = create_map(
+                df,
+                "Latitude",
+                "Longitude",
+                color="Vertical S4",
+                size=40,
+                **kwargs,
+            )
+        return map_fig
+
+    elif viz_type == "Time Series":
+        return create_time_series_plot(df, kwargs.get("svid"))
+    elif viz_type == "Skyplot":
+        return create_skyplot(df)
+    else:
+        raise ValueError(f"Unsupported visualization type: {viz_type}")
+
+
 def main():
     st.set_page_config(layout="wide", page_title="Dynamic S4 Data Plotter")
-
-    st.markdown(
-        custom_css_str,
-        unsafe_allow_html=True,
-    )
+    st.markdown(custom_css_str, unsafe_allow_html=True)
     st.title("Dynamic S4 Data Plotter")
 
     data_dir = os.path.join(os.getcwd(), "data/")
     available_files = os.listdir(data_dir)
-    available_files_path = [os.path.join(data_dir, avl_file) for avl_file in available_files]
+    available_files_path = [
+        os.path.join(data_dir, avl_file) for avl_file in available_files
+    ]
 
-    current_file_selection = st.sidebar.selectbox("Select file", options=available_files)
-    current_index =  available_files.index(current_file_selection)
+    current_file_selection = st.sidebar.selectbox(
+        "Select file", options=available_files
+    )
+    current_index = available_files.index(current_file_selection)
     current_file = io.FileIO(available_files_path[current_index])
 
     if current_file is not None:
-        viz_container = st.empty()
-        data_container = st.empty()
-        download_container = st.empty()
-
         df = load_data(current_file)
         if df is not None and not df.is_empty():
+            viz_container = st.empty()
+            data_container = st.empty()
+            download_container = st.empty()
             with data_container.container():
                 st.write("Data Preview:")
                 st.write(df.head(3))
@@ -129,7 +158,6 @@ def main():
                 .to_list()
             )
 
-            # Sidebar inputs for date and time
             selected_date = st.sidebar.date_input(
                 "Select Date",
                 value=unique_dates[0],
@@ -144,17 +172,16 @@ def main():
                 max_value=max(unique_times),
                 step=timedelta(minutes=1),
             )
-
             window = st.sidebar.slider(
                 "Time Window", value=10, max_value=30, min_value=1
             )
+
             unique_datetimes = (
                 df.select(pl.col("IST_Time").dt.replace_time_zone(None))
                 .unique()
                 .to_series()
                 .sort()
             )
-
             selected_datetime = datetime.combine(selected_date, selected_time)
             nearest_datetime = find_nearest_time(selected_datetime, unique_datetimes)
             time_window = find_time_window(nearest_datetime, window)
@@ -163,7 +190,6 @@ def main():
             longitude_range = st.sidebar.slider(
                 "Longitude Range", -180, 180, (-180, 180)
             )
-
             s4_threshold = st.sidebar.slider("S4 Threshold", 0.0, 1.0, 0.0)
             # Visualization options
             viz_type = st.sidebar.selectbox(
@@ -184,167 +210,58 @@ def main():
                 s4_threshold,
             )
 
-            selected_svid = (
-                st.selectbox(
+            viz_options = {}
+            if viz_type == "Map":
+                viz_options["map_type"] = st.sidebar.selectbox(
+                    "Select Map Type", ["Scatter/Heatmap", "TEC"], index=0
+                )
+                viz_options["map_style"] = st.sidebar.selectbox(
+                    "Select Map Style",
+                    [
+                        "open-street-map",
+                        "carto-darkmatter",
+                        "carto-positron",
+                        "stamen-terrain",
+                        "stamen-toner",
+                        "stamen-watercolor",
+                    ],
+                )
+                if viz_options["map_type"] == "Scatter/Heatmap":
+                    viz_options["marker_size"] = st.sidebar.slider(
+                        "Marker Size", 1, 20, 10
+                    )
+                    viz_options["heatmap_size"] = st.sidebar.slider(
+                        "Heatmap Size", 1, 80, 40
+                    )
+                    viz_options["color_scale"] = st.sidebar.selectbox(
+                        "Color Scale", px.colors.named_colorscales(), index=21
+                    )
+                    viz_options["bin_heatmap"] = st.sidebar.toggle("Bin heatmap")
+            elif viz_type == "Time Series":
+                viz_options["svid"] = st.selectbox(
                     "Select SVID", options=sorted(df["SVID"].unique().to_list())
                 )
-                if viz_type == "Time Series"
-                else None
-            )
 
-            match viz_type:
-                case "Map":
-                    map_type = st.sidebar.selectbox(
-                        "Select Map Type", ["Scatter/Heatmap", "TEC"], index=0
-                    )
-                    map_style = st.sidebar.selectbox(
-                        "Select Map Style",
-                        [
-                            "open-street-map",
-                            "carto-darkmatter",
-                            "carto-positron",
-                            "stamen- terrain",
-                            "stamen-toner",
-                            "stamen-watercolor",
-                        ],
-                    )
-                    if map_type == "TEC":
-                        map_fig = create_contour_map(
-                            df,
-                            lat="Latitude",
-                            lon="Longitude",
-                            color="Vertical Scintillation Amplitude",
-                        )
-                        with viz_container.container():
-                            st.pyplot(map_fig)
-                    else:
-                        marker_size = (
-                            st.sidebar.slider("Marker Size", 1, 20, 10)
-                            if map_type == "Scatter/Heatmap"
-                            else None
-                        )
-                        heatmap_size = (
-                            st.sidebar.slider("Heatmap Size", 1, 80, 40)
-                            if map_type == "Scatter/Heatmap"
-                            else None
-                        )
-                        color_scale = st.sidebar.selectbox(
-                            "Color Scale", px.colors.named_colorscales(), index=21
-                        )
+            fig = create_fig(filtered_df, viz_type, **viz_options)
 
-                        bin_heatmap = (
-                            st.sidebar.toggle("Bin heatmap")
-                            if map_type == "Scatter/Heatmap"
-                            else None
-                        )
+            # Use the appropriate Streamlit function based on the figure type
+            with viz_container.container():
+                if isinstance(fig, plt.Figure):
+                    st.pyplot(fig)
+                elif isinstance(fig, go.Figure):
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.error("Unsupported figure type")
 
-                        map_fig = create_map(
-                            filtered_df,
-                            "Latitude",
-                            "Longitude",
-                            color="Vertical Scintillation Amplitude",
-                            size=None,
-                            map_type=map_type,
-                            map_style=map_style,
-                            marker_size=marker_size,
-                            heatmap_size=heatmap_size,
-                            color_scale=color_scale,
-                            bin_heatmap=bin_heatmap,
-                        )
+            buffer = io.BytesIO()
 
-                        with viz_container.container():
-                            if map_fig.data:
-                                map_fig.update_layout(
-                                    height=1024,  # Adjust this value as needed
-                                    width=None,  # Allow the width to be responsive
-                                )
-                                st.plotly_chart(map_fig, use_container_width=True)
-                            else:
-                                st.error(
-                                    "Unable to create map. Please check your data and selected options."
-                                )
-
-                case "Time Series":
-                    filtered_df = filter_dataframe(
-                        df,
-                        None,
-                        svid,
-                        latitude_range,
-                        longitude_range,
-                        s4_threshold,
-                    )
-                    time_series_fig = create_time_series_plot(filtered_df, svid)
-
-                    with viz_container.container():
-                        st.plotly_chart(time_series_fig, use_container_width=True)
-
-                case "Skyplot":
-                    skyplot_fig = create_skyplot(filtered_df)
-
-                    with viz_container.container():
-                        st.plotly_chart(skyplot_fig, use_container_width=True)
             with download_container.container():
-                match viz_type:
-                    case "Map":
-                        viz_fig = map_fig
-                    case "Time Series":
-                        viz_fig = time_series_fig
-                    case "Skyplot":
-                        viz_fig = skyplot_fig
-                unique_key = (
-                    f"download_button_{time.time()}_{random.randint(0, 1000000)}"
-                )
-                if isinstance(viz_fig, plt.Figure):
-                    fig_png = save_matplotlib_figure_as_png(viz_fig)
-                elif isinstance(viz_fig, go.Figure):
-                    fig_png = save_plotly_figure_as_png(viz_fig)
                 st.download_button(
                     label="Download Visualization as PNG",
-                    data=fig_png,
-                    file_name=f"s4_visualization_{viz_type}_{map_type if viz_type=="Map" else ""}.png",
-                    mime="text/png",
-                    key=unique_key,
+                    data=buffer,
+                    file_name=f"s4_visualization_{viz_type}_{viz_options.get('map_type', '')}.png",
+                    mime="image/png",
                 )
-
-            @st.cache_resource(max_entries=2)
-            def update_download_button(viz_fig, viz_type):
-                with download_container.container():
-                    unique_key = (
-                        f"download_button_{time.time()}_{random.randint(0, 1000000)}"
-                    )
-
-                   
-                    if viz_type == "Map" and map_type == "TEC":
-                        # Handle Matplotlib figures
-                        if isinstance(viz_fig, plt.Figure):
-                            fig_png = save_matplotlib_figure_as_png(viz_fig)
-                            
-                            st.download_button(
-                                label="Download Visualization as PNG",
-                                data=fig_png,
-                                file_name="s4_visualization.png",
-                                mime="image/png",
-                                key=unique_key,
-                            )
-                        else:
-                            st.warning(
-                                "Visualization download is not available for this type of plot."
-                            )
-                    else:
-                        if map_fig.data:
-                            fig_png = save_plotly_figure_as_png(map_fig)
-                            st.download_button(
-                                label="Download Visualization as PNG",
-                                data=fig_png,
-                                file_name="s4_visualization.png",
-                                mime="image/png",
-                                key=unique_key,
-                            )
-                        else:
-                            st.warning(
-                                "Visualization download is not available for this type of plot or the plot is not available."
-                            )
-
     st.markdown(
         """
     ## Help

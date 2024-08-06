@@ -21,7 +21,7 @@ except Exception as e:
 logger = logging.Logger(__name__)
 
 
-@st.cache_resource(max_entries=1)
+@st.cache_resource(max_entries=2, ttl=10)
 def load_data(file: UploadedFile) -> Optional[pl.DataFrame]:
     try:
         logger.info(f"Starting to load data from file: {file.name}")

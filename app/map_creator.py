@@ -12,7 +12,8 @@ import plotly.graph_objects as go
 import polars as pl
 import streamlit as st
 from logging_conf import log_config
-from scipy.interpolate import griddata
+from scipy.interpolate import griddata, LinearNDInterpolator
+from scipy.spatial import cKDTree
 
 try:
     logging.config.dictConfig(log_config)
@@ -166,43 +167,52 @@ def create_map(
         return go.Figure()
 
 
+def idw_interpolation(x, y, z, xi, yi, power=4):
+    dist = np.sqrt((x[:, np.newaxis] - xi) ** 2 + (y[:, np.newaxis] - yi) ** 2)
+    weights = 1.0 / (dist**power + 1e-8)  # Add small constant to avoid division by zero
+    zi = np.sum(weights * z[:, np.newaxis], axis=0) / np.sum(weights, axis=0)
+    return zi
+
+
 def create_contour_map(
     df: pl.DataFrame,
     lat: str,
     lon: str,
     color: str,
     color_scale: str = "jet",
+    n_neighbors: int = 5,
+    p: float = 2,
 ):
     df = df.drop_nulls(subset=[lat, lon, color])
 
     # Convert Polars Series to NumPy arrays
     points = np.array([df[lat].to_numpy(), df[lon].to_numpy()]).T
     values = df[color].to_numpy()
-    values = np.nan_to_num(values, nan=0.0)
 
     # Define grid for interpolation
     grid_lat, grid_lon = np.mgrid[
-        df[lat].min() : df[lat].max() : 100j,
-        df[lon].min() : df[lon].max() : 100j,
+        0:40:25j,
+        65:100:25j,
     ]
 
-    # Flatten the grid for comparison
-    grid_points = np.array([grid_lat.flatten(), grid_lon.flatten()]).T
+    # Flatten the grid points
+    grid_points = np.column_stack((grid_lat.ravel(), grid_lon.ravel()))
 
-    # Find grid points that are not in the original data points
-    unique_points = np.unique(points, axis=0)
-    mask = np.all(np.isin(grid_points, unique_points))
-    xi = grid_points[~mask].flatten()
+    # Build a KD-tree for efficient nearest neighbor search
+    tree = cKDTree(points)
 
-    # Interpolate data onto the grid
-    grid_values = griddata(
-        points,
-        values,
-        (grid_lat, grid_lon),
-        method="linear",
-        rescale=True,
-        fill_value=0.0,
-    )
+    # Find the nearest neighbors for each grid point
+    distances, indices = tree.query(grid_points, k=n_neighbors)
+
+    # Calculate IDW weights
+    weights = 1.0 / (distances**p + 1e-8)
+    weights /= np.sum(weights, axis=1)[:, np.newaxis]
+
+    # Interpolate values
+    grid_values = np.sum(weights * values[indices], axis=1)
+    grid_values = grid_values.reshape(grid_lat.shape)
+
+    grid_values = np.nan_to_num(grid_values, nan=0)
 
     # Create the plot
     fig, ax = plt.subplots(
@@ -216,13 +226,14 @@ def create_contour_map(
     ax.add_feature(cfeature.LAKES, edgecolor="black")
     ax.add_feature(cfeature.RIVERS)
 
+    ax.grid(visible=True, which="both", axis="both")
     # Add contour plot
     cont = ax.contourf(
         grid_lon[0, :],
         grid_lat[:, 0],
         grid_values,
         cmap=color_scale,
-        levels=np.linspace(0, 1, 20),  # Ensure levels are within [0, 1]
+        levels=np.linspace(0, 1, 100),  # Ensure levels are within [0, 1]
         transform=ccrs.PlateCarree(),
     )
     cbar = fig.colorbar(cont, ax=ax, orientation="vertical", pad=0.1)
@@ -230,7 +241,7 @@ def create_contour_map(
 
     # Set extent and title
     ax.set_extent(
-        [df[lon].min(), df[lon].max(), df[lat].min(), df[lat].max()],
+        [65, 100, 0, 40],
         crs=ccrs.PlateCarree(),
     )
     ax.set_title("Contour Map of " + color)

@@ -115,11 +115,7 @@ def create_map(
                     fig.update_layout(
                         title="Intensity-based Heatmap of S4 Values",
                         mapbox_style=map_style,
-                        mapbox=dict(
-                            center=dict(lat=20, lon=82.5), zoom=4
-                        ),  # Center of India
-                        width=1000,
-                        height=800,
+                        mapbox=dict(center=dict(lat=20, lon=82.5), zoom=4),
                     )
                 else:
                     fig = px.scatter_mapbox(
@@ -139,6 +135,10 @@ def create_map(
                             "IST_Time",
                             "Vertical S4",
                         ],
+                    )
+                    fig.update_layout(
+                        mapbox_style=map_style,
+                        mapbox=dict(center=dict(lat=20, lon=82.5), zoom=4),
                     )
             case _:
                 logger.error(f"Unsupported map type: {map_type}")
@@ -181,7 +181,7 @@ def create_contour_map(
     color: str,
     color_scale: str = "jet",
     n_neighbors: int = 5,
-    p: float = 2,
+    power: float = 4,
 ):
     df = df.drop_nulls(subset=[lat, lon, color])
 
@@ -189,10 +189,18 @@ def create_contour_map(
     points = np.array([df[lat].to_numpy(), df[lon].to_numpy()]).T
     values = df[color].to_numpy()
 
+    grid_limits = [
+        min((df["Latitude"].min() - df["Latitude"].min() % 5), 0),
+        max((df["Latitude"].max() + (5 - df["Latitude"].max() % 5)), 40),
+        min((df["Longitude"].min() - df["Longitude"].min() % 5), 65),
+        max((df["Longitude"].max() + (5 - df["Longitude"].max() % 5)), 100),
+    ]
+    x_res = (grid_limits[1] - grid_limits[0]) * 1j
+    y_res = (grid_limits[3] - grid_limits[2]) * 1j
     # Define grid for interpolation
     grid_lat, grid_lon = np.mgrid[
-        0:40:25j,
-        65:100:25j,
+        grid_limits[0] : grid_limits[1] : x_res,
+        grid_limits[2] : grid_limits[3] : y_res,
     ]
 
     # Flatten the grid points
@@ -205,7 +213,7 @@ def create_contour_map(
     distances, indices = tree.query(grid_points, k=n_neighbors)
 
     # Calculate IDW weights
-    weights = 1.0 / (distances**p + 1e-8)
+    weights = 1.0 / (distances**power + 1e-8)
     weights /= np.sum(weights, axis=1)[:, np.newaxis]
 
     # Interpolate values
@@ -216,7 +224,10 @@ def create_contour_map(
 
     # Create the plot
     fig, ax = plt.subplots(
-        figsize=(12, 10), subplot_kw={"projection": ccrs.PlateCarree()}
+        figsize=(16, 9),
+        subplot_kw={"projection": ccrs.PlateCarree()},
+        sharex=True,
+        sharey=True,
     )
 
     # Add features to the map
@@ -226,24 +237,31 @@ def create_contour_map(
     ax.add_feature(cfeature.LAKES, edgecolor="black")
     ax.add_feature(cfeature.RIVERS)
 
-    ax.grid(visible=True, which="both", axis="both")
     # Add contour plot
     cont = ax.contourf(
         grid_lon[0, :],
         grid_lat[:, 0],
         grid_values,
         cmap=color_scale,
-        levels=np.linspace(0, 1, 100),  # Ensure levels are within [0, 1]
+        levels=np.linspace(0, 1, 500),  # Ensure levels are within [0, 1]
         transform=ccrs.PlateCarree(),
     )
+    ax.set_extent(
+        [grid_limits[2], grid_limits[3], grid_limits[0], grid_limits[1]],
+        crs=ccrs.PlateCarree(),
+    )
+    ax.set_xticks(
+        np.arange(grid_limits[2], grid_limits[3] + 1, 5), crs=ccrs.PlateCarree()
+    )
+    ax.set_yticks(
+        np.arange(grid_limits[0], grid_limits[1] + 1, 5), crs=ccrs.PlateCarree()
+    )
+    ax.gridlines(draw_labels=True, dms=True, x_inline=False, y_inline=False)
+
     cbar = fig.colorbar(cont, ax=ax, orientation="vertical", pad=0.1)
     cbar.set_label(color)  # Set colorbar label to reflect the color parameter
 
     # Set extent and title
-    ax.set_extent(
-        [65, 100, 0, 40],
-        crs=ccrs.PlateCarree(),
-    )
     ax.set_title("Contour Map of " + color)
 
     return fig

@@ -117,7 +117,6 @@ def create_fig(df, viz_type, **kwargs):
 def main():
     st.set_page_config(layout="wide", page_title="Dynamic S4 Data Plotter")
     st.markdown(custom_css_str, unsafe_allow_html=True)
-    st.title("Dynamic S4 Data Plotter")
 
     data_dir = os.path.join(os.getcwd(), "data/")
     available_files = os.listdir(data_dir)
@@ -137,7 +136,7 @@ def main():
             viz_container = st.empty()
             data_container = st.empty()
             download_container = st.empty()
-            with data_container.container():
+            with data_container.container(height=300, border=False):
                 st.write("Data Preview:")
                 st.write(df.head(3))
 
@@ -245,9 +244,9 @@ def main():
             fig = create_fig(filtered_df, viz_type, **viz_options)
 
             # Use the appropriate Streamlit function based on the figure type
-            with viz_container.container():
+            with viz_container.container(border=False):
                 if isinstance(fig, plt.Figure):
-                    st.pyplot(fig)
+                    st.pyplot(fig, use_container_width=True)
                 elif isinstance(fig, go.Figure):
                     st.plotly_chart(fig, use_container_width=True)
                 else:
@@ -255,7 +254,7 @@ def main():
 
             buffer = io.BytesIO()
 
-            with download_container.container():
+            with download_container.container(height=44, border=False):
                 st.download_button(
                     label="Download Visualization as PNG",
                     data=buffer,

@@ -1,18 +1,18 @@
-import hashlib
 import logging
 import logging.config
-import time
+import os
 import warnings
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
 import streamlit as st
 import torch
-from scipy.interpolate import interp1d
+from pytorch_lightning import LightningDataModule
+from scipy.interpolate import griddata, interp1d
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from torch.utils.data import DataLoader, Dataset
 
 warnings.filterwarnings("ignore")
@@ -121,7 +121,7 @@ def slant_to_vertical(df: pl.DataFrame):
     term_3 = (1 / term_2) ** (p + 0.25)
     vertical_scintillation_amplitude = pl.Series(
         "Vertical S4", amplitude_scintillation_slant / term_3
-    )
+    ).fill_nan(np.nanmean(amplitude_scintillation_slant / term_3))
 
     phase_scintillation_rad = df[
         "Phi60 on Sig1, 60-second phase sigma (radians)"
@@ -130,9 +130,12 @@ def slant_to_vertical(df: pl.DataFrame):
     term_4 = (1 / term_2) ** (0.5)
     vertical_scintillation_phase = pl.Series(
         "Vertical Scintillation Phase", phase_scintillation_rad / term_4
-    )
+    ).fill_nan(np.nanmean(phase_scintillation_rad))
 
-    df.insert_column(-1, vertical_scintillation_amplitude)
+    df.insert_column(
+        -1,
+        vertical_scintillation_amplitude,
+    )
     df.insert_column(-1, vertical_scintillation_phase)
 
     return df
@@ -152,7 +155,7 @@ def preprocess_dataframe(
             .alias("IST_Time")
         ]
     )
-    return df.drop_nulls(
+    df = df.drop_nulls(
         subset=[
             "GPS_WN",
             "GPS_TOW",
@@ -163,7 +166,33 @@ def preprocess_dataframe(
             "Latitude",
             "Longitude",
         ]
-    ).drop(["GPS_WN", "GPS_TOW"])
+    ).drop(
+        [
+            "GPS_WN",
+            "GPS_TOW",
+            "Azimuth",
+            "Elevation",
+            "SVID",
+            "sbf2ismr version number",
+            "Value of the RxState field of the ReceiverStatus SBF block",
+        ]
+    )
+    # Calculate the null percentage for each column
+    null_percentage = df.select(
+        [
+            (pl.col(c).is_null().sum() / pl.col(c).count() * 100).alias(c)
+            for c in df.columns
+        ]
+    )
+
+    # Find columns with null percentage <= 40%
+    valid_columns = [
+        col for col in null_percentage.columns if null_percentage[col][0] <= 40
+    ]
+
+    # Select only valid columns
+    df = df.select(valid_columns)
+    return df
 
 
 def load_data(file: str) -> Optional[pl.DataFrame]:
@@ -215,197 +244,224 @@ def load_data(file: str) -> Optional[pl.DataFrame]:
 
 
 class IonosphereDataset(Dataset):
+
     def __init__(
         self,
-        dataframe: pl.DataFrame,
-        target_column="Vertical S4",
+        dataframe,
         sequence_length=60,
-        prediction_horizon=1,
-        missing_data="closest",
-        max_gap=5,
-        stride=1,
+        prediction_horizon=6,
+        grid_lon_range=(65, 100),
+        grid_lat_range=(0, 40),
+        grid_resolution=1,
     ):
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
-        self.missing_data = missing_data
-        self.max_gap = max_gap
-        self.stride = stride
+        self.grid_lon_range = grid_lon_range
+        self.grid_lat_range = grid_lat_range
+        self.grid_resolution = grid_resolution
 
         dataframe = dataframe.sort("IST_Time")
-        self.scaler = StandardScaler()
-        self.features = self.scaler.fit_transform(
-            dataframe.drop(["IST_Time", target_column, "S4"]).to_numpy()
-        )
-        self.target = dataframe[target_column].to_numpy()
         self.timestamps = dataframe["IST_Time"].to_numpy()
-        self.minmaxScaler = MinMaxScaler()
-        self.target = self.minmaxScaler.fit_transform(self.target.reshape(-1, 1))
+        self.longitudes = dataframe["Longitude"].to_numpy()
+        self.latitudes = dataframe["Latitude"].to_numpy()
+
+        self.vertical_s4 = np.float32(dataframe["Vertical S4"].to_numpy())
+        self.vertical_phase = np.float32(
+            dataframe["Vertical Scintillation Phase"].to_numpy()
+        )
+
+        self.grid_lon = np.arange(grid_lon_range[0], grid_lon_range[1], grid_resolution)
+        self.grid_lat = np.arange(grid_lat_range[0], grid_lat_range[1], grid_resolution)
+        self.grid_points = np.array(
+            np.meshgrid(self.grid_lon, self.grid_lat)
+        ).T.reshape(-1, 2)
+
+        self.minmaxScaler_s4 = MinMaxScaler(feature_range=(0, 1))
+        self.minmaxScaler_phase = MinMaxScaler(feature_range=(0, 1))
+        self.vertical_s4 = self.minmaxScaler_s4.fit_transform(
+            self.vertical_s4.reshape(-1, 1)
+        ).flatten()
+        self.vertical_phase = self.minmaxScaler_phase.fit_transform(
+            self.vertical_phase.reshape(-1, 1)
+        ).flatten()
 
     def __len__(self):
-        return (
-            len(self.features) - self.sequence_length - self.prediction_horizon + 1
-        ) // self.stride
+        return len(self.timestamps) - self.sequence_length - self.prediction_horizon + 1
 
     def __getitem__(self, idx):
-        actual_idx = idx * self.stride
-
-        start_time = self.timestamps[actual_idx]
-        end_time = start_time + np.timedelta64(self.sequence_length - 1, "m")
-        target_time = end_time + np.timedelta64(self.prediction_horizon, "m")
-
-        time_mask = (self.timestamps >= start_time) & (self.timestamps <= end_time)
-        target_idx = np.searchsorted(self.timestamps, target_time)
-
-        if self.missing_data == "closest":
-            feature_seq = self._get_closest_data(time_mask, start_time, end_time)
-        elif self.missing_data == "interpolate":
-            feature_seq = self._interpolate_data(time_mask, start_time, end_time)
-
-        if feature_seq is None:
-            return None
-
-        result = (
-            torch.FloatTensor(feature_seq),
-            torch.FloatTensor([self.target[target_idx - 1]]),
-        )
-        return result
-
-    def _get_closest_data(self, time_mask, start_time, end_time):
-        available_times = self.timestamps[time_mask]
-        available_features = self.features[time_mask]
-        full_sequence_times = np.arange(
-            start_time, end_time + np.timedelta64(1, "m"), np.timedelta64(1, "m")
-        )
-
-        if np.any(np.diff(full_sequence_times) > np.timedelta64(self.max_gap, "m")):
-            return None
-
-        closest_indices = np.searchsorted(available_times, full_sequence_times)
-        closest_indices = np.clip(closest_indices, 0, len(available_times) - 1)
-        return available_features[closest_indices]
-
-    def _interpolate_data(self, time_mask, start_time, end_time):
-        full_sequence_times = np.arange(
-            start_time, end_time + np.timedelta64(1, "m"), np.timedelta64(1, "m")
-        )
-
-        if np.any(np.diff(full_sequence_times) > np.timedelta64(self.max_gap, "m")):
-            return None
-
-        available_times_num = (
-            self.timestamps[time_mask] - start_time
-        ) / np.timedelta64(1, "m")
-        full_sequence_times_num = (full_sequence_times - start_time) / np.timedelta64(
-            1, "m"
-        )
-
-        feature_seq = np.zeros((len(full_sequence_times), self.features.shape[1]))
-        for i in range(self.features.shape[1]):
-            f = interp1d(
-                available_times_num,
-                self.features[time_mask, i],
-                kind="linear",
-                bounds_error=False,
-                fill_value="extrapolate",
+        sequence_data_s4 = [
+            self._calculate_grid(
+                self.longitudes[idx + i],
+                self.latitudes[idx + i],
+                self.vertical_s4[idx + i],
             )
-            feature_seq[:, i] = f(full_sequence_times_num)
+            for i in range(self.sequence_length)
+        ]
+        sequence_data_phase = [
+            self._calculate_grid(
+                self.longitudes[idx + i],
+                self.latitudes[idx + i],
+                self.vertical_phase[idx + i],
+            )
+            for i in range(self.sequence_length)
+        ]
 
-        return feature_seq
+        target_data_s4 = [
+            self._calculate_grid(
+                self.longitudes[idx + self.sequence_length + i],
+                self.latitudes[idx + self.sequence_length + i],
+                self.vertical_s4[idx + self.sequence_length + i],
+            )
+            for i in range(self.prediction_horizon)
+        ]
+        target_data_phase = [
+            self._calculate_grid(
+                self.longitudes[idx + self.sequence_length + i],
+                self.latitudes[idx + self.sequence_length + i],
+                self.vertical_phase[idx + self.sequence_length + i],
+            )
+            for i in range(self.prediction_horizon)
+        ]
+
+        return {
+            "features_s4": torch.from_numpy(np.array(sequence_data_s4)),
+            "features_phase": torch.from_numpy(np.array(sequence_data_phase)),
+            "target_s4": torch.from_numpy(np.array(target_data_s4)),
+            "target_phase": torch.from_numpy(np.array(target_data_phase)),
+        }
+
+    def __getitem__(self, idx):
+        # Get the unique timestamps for the sequence and prediction horizon
+        timestamps_sequence = self.timestamps[idx : idx + self.sequence_length]
+        timestamps_target = self.timestamps[
+            idx
+            + self.sequence_length : idx
+            + self.sequence_length
+            + self.prediction_horizon
+        ]
+
+        # Group the data by IST_Time for the sequence
+        sequence_data_s4 = [
+            self._calculate_grid(
+                self.longitudes[self.timestamps == timestamp],
+                self.latitudes[self.timestamps == timestamp],
+                self.vertical_s4[self.timestamps == timestamp],
+            )
+            for timestamp in timestamps_sequence
+        ]
+
+        sequence_data_phase = [
+            self._calculate_grid(
+                self.longitudes[self.timestamps == timestamp],
+                self.latitudes[self.timestamps == timestamp],
+                self.vertical_phase[self.timestamps == timestamp],
+            )
+            for timestamp in timestamps_sequence
+        ]
+
+        # Group the data by IST_Time for the prediction horizon
+        target_data_s4 = [
+            self._calculate_grid(
+                self.longitudes[self.timestamps == timestamp],
+                self.latitudes[self.timestamps == timestamp],
+                self.vertical_s4[self.timestamps == timestamp],
+            )
+            for timestamp in timestamps_target
+        ]
+
+        target_data_phase = [
+            self._calculate_grid(
+                self.longitudes[self.timestamps == timestamp],
+                self.latitudes[self.timestamps == timestamp],
+                self.vertical_phase[self.timestamps == timestamp],
+            )
+            for timestamp in timestamps_target
+        ]
+
+        return {
+            "features_s4": torch.from_numpy(np.array(sequence_data_s4)),
+            "features_phase": torch.from_numpy(np.array(sequence_data_phase)),
+            "target_s4": torch.from_numpy(np.array(target_data_s4)),
+            "target_phase": torch.from_numpy(np.array(target_data_phase)),
+        }
 
 
-def data_generator(
-    df: pl.DataFrame, batch_size: int, sequence_length: int, prediction_horizon: int
-):
-    total_length = len(df) - sequence_length - prediction_horizon + 1
-    indices = np.arange(total_length)
-    np.random.shuffle(indices)
+class IonosphereDataModule(LightningDataModule):
+    def __init__(
+        self,
+        dataframe: pl.DataFrame,
+        sequence_length: int,
+        prediction_horizon: int,
+        grid_lon_range: Tuple[float, float],
+        grid_lat_range: Tuple[float, float],
+        grid_resolution: float,
+        batch_size: int,
+        num_workers: int,
+    ):
+        super().__init__()
+        self.dataframe = dataframe
+        self.sequence_length = sequence_length
+        self.prediction_horizon = prediction_horizon
+        self.grid_lon_range = grid_lon_range
+        self.grid_lat_range = grid_lat_range
+        range_func = lambda x: int(abs(x[1] - x[0]))
+        self.grid_resolution = grid_resolution
+        self.grid_size = (range_func(grid_lat_range), range_func(grid_lon_range))
+        self.batch_size = batch_size
+        self.num_workers = num_workers
 
-    for i in range(0, total_length, batch_size):
-        batch_indices = indices[i : i + batch_size]
-        yield df.slice(
-            batch_indices.min(),
-            batch_indices.max()
-            - batch_indices.min()
-            + sequence_length
-            + prediction_horizon,
+    def setup(self, stage=None):
+        # Split the data into train, validation, and test sets
+        total_samples = len(self.dataframe)
+        train_size = int(0.7 * total_samples)
+        val_size = int(0.15 * total_samples)
+
+        train_df = self.dataframe.slice(0, train_size)
+        val_df = self.dataframe.slice(train_size, train_size + val_size)
+        test_df = self.dataframe.slice(train_size + val_size, total_samples)
+
+        self.train_dataset = IonosphereDataset(
+            train_df,
+            self.sequence_length,
+            self.prediction_horizon,
+            self.grid_size,
+        )
+        self.val_dataset = IonosphereDataset(
+            val_df,
+            self.sequence_length,
+            self.prediction_horizon,
+            self.grid_size,
+        )
+        self.test_dataset = IonosphereDataset(
+            test_df,
+            self.sequence_length,
+            self.prediction_horizon,
+            self.grid_size,
         )
 
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
 
-def prepare_data_loaders(
-    file_path,
-    batch_size=32,
-    sequence_length=60,
-    prediction_horizon=1,
-    test_size=0.2,
-    val_size=0.1,
-    missing_data="closest",
-    max_gap=5,
-    stride=1,
-):
-    df = load_data(file_path)
-    if df is None:
-        raise ValueError("Failed to load data")
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
 
-    train_val_df, test_df = train_test_split(df, test_size=test_size, random_state=42)
-    train_df, val_df = train_test_split(
-        train_val_df, test_size=val_size / (1 - test_size), random_state=42
-    )
-
-    train_dataset = IonosphereDataset(
-        train_df,
-        sequence_length=sequence_length,
-        prediction_horizon=prediction_horizon,
-        missing_data=missing_data,
-        max_gap=max_gap,
-        stride=stride,
-    )
-    val_dataset = IonosphereDataset(
-        val_df,
-        sequence_length=sequence_length,
-        prediction_horizon=prediction_horizon,
-        missing_data=missing_data,
-        max_gap=max_gap,
-        stride=stride,
-    )
-    test_dataset = IonosphereDataset(
-        test_df,
-        sequence_length=sequence_length,
-        prediction_horizon=prediction_horizon,
-        missing_data=missing_data,
-        max_gap=max_gap,
-        stride=stride,
-    )
-
-    def collate_fn(batch):
-        batch = list(filter(lambda x: x is not None, batch))
-        return torch.utils.data.dataloader.default_collate(batch)
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=16,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=4,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-
-    return train_loader, val_loader, test_loader, train_dataset.minmaxScaler
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )

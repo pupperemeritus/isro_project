@@ -15,7 +15,7 @@ pyarrow = "^16.1.0"
 scipy = "^1.14.0"
 polars = "^1.2.1"
 torch = "^2.3.1"
-lightning = "^2.3.3"
+lightning = "^2.4.0"
 tensorrt = "^10.2.0.post1"
 torchvision = "^0.18.1"
 ipykernel = "^6.29.5"
@@ -25,6 +25,7 @@ cartopy = "^0.23.0"
 matplotlib = "^3.9.1"
 kaleido = "0.2.1"
 streamlit = "^1.37.0"
+mlflow = "^2.16.2"
 
 
 [build-system]

@@ -3,7 +3,8 @@ import logging.config
 import os
 import warnings
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from functools import partial
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import polars as pl
@@ -243,146 +244,142 @@ def load_data(file: str) -> Optional[pl.DataFrame]:
         return None
 
 
-class IonosphereDataset(Dataset):
+def create_grid(lon_range, lat_range, grid_resolution):
+    lon_start, lon_end = lon_range
+    lat_start, lat_end = lat_range
 
+    lon_start, lon_end = lon_range
+    lat_start, lat_end = lat_range
+
+    grid_lon = np.arange(lon_start, lon_end + grid_resolution, grid_resolution)
+    grid_lat = np.arange(lat_start, lat_end + grid_resolution, grid_resolution)
+
+    return grid_lon, grid_lat
+
+
+def interpolate_to_grid(points, values, grid_lon, grid_lat):
+    grid_x, grid_y = np.meshgrid(grid_lon, grid_lat)
+    interpolated = griddata(
+        points,
+        values,
+        (grid_x, grid_y),
+        method="linear",
+        fill_value=0,
+    )
+    return interpolated
+
+
+class IonosphereDataset(Dataset):
     def __init__(
         self,
-        dataframe,
-        sequence_length=60,
-        prediction_horizon=6,
-        grid_lon_range=(65, 100),
-        grid_lat_range=(0, 40),
-        grid_resolution=1,
+        dataframe: pl.DataFrame,
+        time_window: str,
+        sequence_length: int,
+        prediction_horizon: int,
+        lon_range: Tuple[float, float],
+        lat_range: Tuple[float, float],
+        grid_resolution: float,
+        stride: int,
     ):
+        self.df = dataframe.sort("IST_Time")
+        self.time_window = time_window
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
-        self.grid_lon_range = grid_lon_range
-        self.grid_lat_range = grid_lat_range
-        self.grid_resolution = grid_resolution
+        self.stride = stride
 
-        dataframe = dataframe.sort("IST_Time")
-        self.timestamps = dataframe["IST_Time"].to_numpy()
-        self.longitudes = dataframe["Longitude"].to_numpy()
-        self.latitudes = dataframe["Latitude"].to_numpy()
-
-        self.vertical_s4 = np.float32(dataframe["Vertical S4"].to_numpy())
-        self.vertical_phase = np.float32(
-            dataframe["Vertical Scintillation Phase"].to_numpy()
+        # Create fixed grid
+        self.grid_lon, self.grid_lat = create_grid(
+            lon_range, lat_range, grid_resolution
         )
 
-        self.grid_lon = np.arange(grid_lon_range[0], grid_lon_range[1], grid_resolution)
-        self.grid_lat = np.arange(grid_lat_range[0], grid_lat_range[1], grid_resolution)
-        self.grid_points = np.array(
-            np.meshgrid(self.grid_lon, self.grid_lat)
-        ).T.reshape(-1, 2)
+        # Group data by time windows
+        self.grouped_data = list(self.df.group_by_dynamic("IST_Time", every=time_window))
 
-        self.minmaxScaler_s4 = MinMaxScaler(feature_range=(0, 1))
-        self.minmaxScaler_phase = MinMaxScaler(feature_range=(0, 1))
-        self.vertical_s4 = self.minmaxScaler_s4.fit_transform(
-            self.vertical_s4.reshape(-1, 1)
-        ).flatten()
-        self.vertical_phase = self.minmaxScaler_phase.fit_transform(
-            self.vertical_phase.reshape(-1, 1)
-        ).flatten()
+        # Create sequences
+        self.sequences = [
+            (i, i + sequence_length + prediction_horizon)
+            for i in range(
+                0,
+                len(self.grouped_data) - sequence_length - prediction_horizon + 1,
+                self.stride,
+            )
+        ]
+
+        # Compute grid steps
+        self.grid_lon_steps = len(self.grid_lon)
+        self.grid_lat_steps = len(self.grid_lat)
 
     def __len__(self):
-        return len(self.timestamps) - self.sequence_length - self.prediction_horizon + 1
+        return len(self.sequences)
 
     def __getitem__(self, idx):
-        sequence_data_s4 = [
-            self._calculate_grid(
-                self.longitudes[idx + i],
-                self.latitudes[idx + i],
-                self.vertical_s4[idx + i],
-            )
-            for i in range(self.sequence_length)
-        ]
-        sequence_data_phase = [
-            self._calculate_grid(
-                self.longitudes[idx + i],
-                self.latitudes[idx + i],
-                self.vertical_phase[idx + i],
-            )
-            for i in range(self.sequence_length)
-        ]
+        start, end = self.sequences[idx]
+        sequence_data = self.grouped_data[start : start + self.sequence_length]
+        target_data = self.grouped_data[start + self.prediction_horizon : end]
 
-        target_data_s4 = [
-            self._calculate_grid(
-                self.longitudes[idx + self.sequence_length + i],
-                self.latitudes[idx + self.sequence_length + i],
-                self.vertical_s4[idx + self.sequence_length + i],
-            )
-            for i in range(self.prediction_horizon)
-        ]
-        target_data_phase = [
-            self._calculate_grid(
-                self.longitudes[idx + self.sequence_length + i],
-                self.latitudes[idx + self.sequence_length + i],
-                self.vertical_phase[idx + self.sequence_length + i],
-            )
-            for i in range(self.prediction_horizon)
-        ]
+        # Interpolate sequence data to grid
+        sequence_s4 = np.stack(
+            [
+                interpolate_to_grid(
+                    group[1][["Longitude", "Latitude"]].to_numpy(),
+                    group[1]["Vertical S4"].to_numpy(),
+                    self.grid_lon,
+                    self.grid_lat,
+                )
+                for group in sequence_data
+            ]
+        )
 
-        return {
-            "features_s4": torch.from_numpy(np.array(sequence_data_s4)),
-            "features_phase": torch.from_numpy(np.array(sequence_data_phase)),
-            "target_s4": torch.from_numpy(np.array(target_data_s4)),
-            "target_phase": torch.from_numpy(np.array(target_data_phase)),
-        }
+        sequence_phase = np.stack(
+            [
+                interpolate_to_grid(
+                    group[1][["Longitude", "Latitude"]].to_numpy(),
+                    group[1]["Vertical Scintillation Phase"].to_numpy(),
+                    self.grid_lon,
+                    self.grid_lat,
+                )
+                for group in sequence_data
+            ]
+        )
 
-    def __getitem__(self, idx):
-        # Get the unique timestamps for the sequence and prediction horizon
-        timestamps_sequence = self.timestamps[idx : idx + self.sequence_length]
-        timestamps_target = self.timestamps[
-            idx
-            + self.sequence_length : idx
-            + self.sequence_length
-            + self.prediction_horizon
-        ]
+        # Interpolate target data to grid
+        target_s4 = np.stack(
+            [
+                interpolate_to_grid(
+                    group[1][["Longitude", "Latitude"]].to_numpy(),
+                    group[1]["Vertical S4"].to_numpy(),
+                    self.grid_lon,
+                    self.grid_lat,
+                )
+                for group in target_data
+            ]
+        )
 
-        # Group the data by IST_Time for the sequence
-        sequence_data_s4 = [
-            self._calculate_grid(
-                self.longitudes[self.timestamps == timestamp],
-                self.latitudes[self.timestamps == timestamp],
-                self.vertical_s4[self.timestamps == timestamp],
-            )
-            for timestamp in timestamps_sequence
-        ]
-
-        sequence_data_phase = [
-            self._calculate_grid(
-                self.longitudes[self.timestamps == timestamp],
-                self.latitudes[self.timestamps == timestamp],
-                self.vertical_phase[self.timestamps == timestamp],
-            )
-            for timestamp in timestamps_sequence
-        ]
-
-        # Group the data by IST_Time for the prediction horizon
-        target_data_s4 = [
-            self._calculate_grid(
-                self.longitudes[self.timestamps == timestamp],
-                self.latitudes[self.timestamps == timestamp],
-                self.vertical_s4[self.timestamps == timestamp],
-            )
-            for timestamp in timestamps_target
-        ]
-
-        target_data_phase = [
-            self._calculate_grid(
-                self.longitudes[self.timestamps == timestamp],
-                self.latitudes[self.timestamps == timestamp],
-                self.vertical_phase[self.timestamps == timestamp],
-            )
-            for timestamp in timestamps_target
-        ]
+        target_phase = np.stack(
+            [
+                interpolate_to_grid(
+                    group[1][["Longitude", "Latitude"]].to_numpy(),
+                    group[1]["Vertical Scintillation Phase"].to_numpy(),
+                    self.grid_lon,
+                    self.grid_lat,
+                )
+                for group in target_data
+            ]
+        )
 
         return {
-            "features_s4": torch.from_numpy(np.array(sequence_data_s4)),
-            "features_phase": torch.from_numpy(np.array(sequence_data_phase)),
-            "target_s4": torch.from_numpy(np.array(target_data_s4)),
-            "target_phase": torch.from_numpy(np.array(target_data_phase)),
+            "features_s4": torch.from_numpy(
+                sequence_s4
+            ).float(),  # [seq_len, lat_steps, lon_steps]
+            "features_phase": torch.from_numpy(
+                sequence_phase
+            ).float(),  # [seq_len, lat_steps, lon_steps]
+            "target_s4": torch.from_numpy(
+                target_s4
+            ).float(),  # [pred_horizon, lat_steps, lon_steps]
+            "target_phase": torch.from_numpy(
+                target_phase
+            ).float(),  # [pred_horizon, lat_steps, lon_steps]
         }
 
 
@@ -395,73 +392,73 @@ class IonosphereDataModule(LightningDataModule):
         grid_lon_range: Tuple[float, float],
         grid_lat_range: Tuple[float, float],
         grid_resolution: float,
+        time_window: str,
+        stride: int,
         batch_size: int,
         num_workers: int,
     ):
         super().__init__()
+        self.save_hyperparameters(ignore=["dataframe"])
         self.dataframe = dataframe
-        self.sequence_length = sequence_length
-        self.prediction_horizon = prediction_horizon
-        self.grid_lon_range = grid_lon_range
-        self.grid_lat_range = grid_lat_range
-        range_func = lambda x: int(abs(x[1] - x[0]))
-        self.grid_resolution = grid_resolution
-        self.grid_size = (range_func(grid_lat_range), range_func(grid_lon_range))
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+
+        # Create grid
+        self.grid_lon, self.grid_lat = create_grid(
+            grid_lon_range, grid_lat_range, grid_resolution
+        )
+
+        # Compute grid steps
+        self.grid_lon_steps = len(self.grid_lon)
+        self.grid_lat_steps = len(self.grid_lat)
+
+        # Calculate input size dynamically
+        self.input_size = self.grid_lon_steps * self.grid_lat_steps * 2
 
     def setup(self, stage=None):
-        # Split the data into train, validation, and test sets
+        train_df, val_df, test_df = self._split_data()
+
+        dataset_params = dict(
+            sequence_length=self.hparams.sequence_length,
+            prediction_horizon=self.hparams.prediction_horizon,
+            lon_range=self.hparams.grid_lon_range,
+            lat_range=self.hparams.grid_lat_range,
+            grid_resolution=self.hparams.grid_resolution,
+            time_window=self.hparams.time_window,
+            stride=self.hparams.stride,
+        )
+
+        self.train_dataset = IonosphereDataset(train_df, **dataset_params)
+        self.val_dataset = IonosphereDataset(val_df, **dataset_params)
+        self.test_dataset = IonosphereDataset(test_df, **dataset_params)
+
+    def _split_data(self) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
         total_samples = len(self.dataframe)
-        train_size = int(0.7 * total_samples)
-        val_size = int(0.15 * total_samples)
+        train_size, val_size = int(0.7 * total_samples), int(0.15 * total_samples)
 
-        train_df = self.dataframe.slice(0, train_size)
-        val_df = self.dataframe.slice(train_size, train_size + val_size)
-        test_df = self.dataframe.slice(train_size + val_size, total_samples)
-
-        self.train_dataset = IonosphereDataset(
-            train_df,
-            self.sequence_length,
-            self.prediction_horizon,
-            self.grid_size,
-        )
-        self.val_dataset = IonosphereDataset(
-            val_df,
-            self.sequence_length,
-            self.prediction_horizon,
-            self.grid_size,
-        )
-        self.test_dataset = IonosphereDataset(
-            test_df,
-            self.sequence_length,
-            self.prediction_horizon,
-            self.grid_size,
+        return (
+            self.dataframe.slice(0, train_size),
+            self.dataframe.slice(train_size, train_size + val_size),
+            self.dataframe.slice(train_size + val_size, total_samples),
         )
 
-    def train_dataloader(self):
+    def train_dataloader(self) -> DataLoader:
+        return self._create_dataloader(self.train_dataset, shuffle=True)
+
+    def val_dataloader(self) -> DataLoader:
+        return self._create_dataloader(self.val_dataset, shuffle=False)
+
+    def test_dataloader(self) -> DataLoader:
+        return self._create_dataloader(self.test_dataset, shuffle=False)
+
+    def _create_dataloader(self, dataset: Dataset, shuffle: bool) -> DataLoader:
+        def collate_fn(batch):
+            collated = torch.utils.data.dataloader.default_collate(batch)
+            return collated
+
         return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
+            dataset,
+            batch_size=self.hparams.batch_size,
+            shuffle=shuffle,
+            num_workers=self.hparams.num_workers,
             pin_memory=True,
-        )
-
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
-
-    def test_dataloader(self):
-        return DataLoader(
-            self.test_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True,
+            collate_fn=collate_fn,
         )

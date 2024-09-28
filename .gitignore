@@ -120,3 +120,4 @@ data
 lightning_logs
 tb_logs
 checkpoints
+mlruns

@@ -15,6 +15,7 @@ from scipy.interpolate import griddata, interp1d
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from torch.utils.data import DataLoader, Dataset
+from scipy.stats import binned_statistic_2d
 
 warnings.filterwarnings("ignore")
 
@@ -244,29 +245,82 @@ def load_data(file: str) -> Optional[pl.DataFrame]:
         return None
 
 
-def create_grid(lon_range, lat_range, grid_resolution):
-    lon_start, lon_end = lon_range
+def create_grid(
+    lat_range,
+    lon_range,
+    grid_resolution,
+):
     lat_start, lat_end = lat_range
-
     lon_start, lon_end = lon_range
-    lat_start, lat_end = lat_range
 
-    grid_lon = np.arange(lon_start, lon_end + grid_resolution, grid_resolution)
     grid_lat = np.arange(lat_start, lat_end + grid_resolution, grid_resolution)
+    grid_lon = np.arange(lon_start, lon_end + grid_resolution, grid_resolution)
 
-    return grid_lon, grid_lat
+    return grid_lat, grid_lon
 
 
-def interpolate_to_grid(points, values, grid_lon, grid_lat):
+def interpolate_to_grid(
+    points,
+    values,
+    grid_lat,
+    grid_lon,
+    min_points=4,
+):
+    if len(points) < min_points:
+        print(
+            f"Not enough points for interpolation. Using binning instead. Points: {len(points)}"
+        )
+        return bin_to_grid(points, values, grid_lat, grid_lon)
+
     grid_x, grid_y = np.meshgrid(grid_lon, grid_lat)
-    interpolated = griddata(
-        points,
+
+    try:
+        interpolated = griddata(
+            points,
+            values,
+            (grid_x, grid_y),
+            method="linear",
+            fill_value=np.nan,
+        )
+
+        # If interpolation produced all NaN values, fall back to binning
+        if np.all(np.isnan(interpolated)):
+            print("Interpolation resulted in all NaN values. Falling back to binning.")
+            return bin_to_grid(points, values, grid_lat, grid_lon)
+
+        # Fill any remaining NaN values using binning
+        nan_mask = np.isnan(interpolated)
+        if np.any(nan_mask):
+            binned = bin_to_grid(points, values, grid_lat, grid_lon)
+            interpolated[nan_mask] = binned[nan_mask]
+
+        return interpolated
+
+    except ValueError as e:
+        print(f"Interpolation failed: {e}. Falling back to binning.")
+        return bin_to_grid(points, values, grid_lat, grid_lon)
+
+
+def bin_to_grid(points, values, grid_lat, grid_lon):
+    lat_min, lat_max = np.min(grid_lat), np.max(grid_lat)
+    lon_min, lon_max = np.min(grid_lon), np.max(grid_lon)
+
+    binned, _, _, _ = binned_statistic_2d(
+        points[:, 1],  # Longitude
+        points[:, 0],  # Latitude
         values,
-        (grid_x, grid_y),
-        method="linear",
-        fill_value=0,
+        bins=[len(grid_lon), len(grid_lat)],
+        statistic="mean",
+        range=[[lon_min, lon_max], [lat_min, lat_max]],
     )
-    return interpolated
+
+    # Transpose the binned data to match the expected shape (lat, lon)
+    binned = binned.T
+
+    # Fill NaN values with 0 or another appropriate value
+    binned = np.nan_to_num(binned, 0)
+
+    return binned
 
 
 class IonosphereDataset(Dataset):
@@ -276,8 +330,8 @@ class IonosphereDataset(Dataset):
         time_window: str,
         sequence_length: int,
         prediction_horizon: int,
-        lon_range: Tuple[float, float],
         lat_range: Tuple[float, float],
+        lon_range: Tuple[float, float],
         grid_resolution: float,
         stride: int,
     ):
@@ -288,12 +342,16 @@ class IonosphereDataset(Dataset):
         self.stride = stride
 
         # Create fixed grid
-        self.grid_lon, self.grid_lat = create_grid(
-            lon_range, lat_range, grid_resolution
+        self.grid_lat, self.grid_lon = create_grid(
+            lat_range,
+            lon_range,
+            grid_resolution,
         )
 
         # Group data by time windows
-        self.grouped_data = list(self.df.group_by_dynamic("IST_Time", every=time_window))
+        self.grouped_data = list(
+            self.df.group_by_dynamic("IST_Time", every=time_window)
+        )
 
         # Create sequences
         self.sequences = [
@@ -306,8 +364,8 @@ class IonosphereDataset(Dataset):
         ]
 
         # Compute grid steps
-        self.grid_lon_steps = len(self.grid_lon)
         self.grid_lat_steps = len(self.grid_lat)
+        self.grid_lon_steps = len(self.grid_lon)
 
     def __len__(self):
         return len(self.sequences)
@@ -315,28 +373,56 @@ class IonosphereDataset(Dataset):
     def __getitem__(self, idx):
         start, end = self.sequences[idx]
         sequence_data = self.grouped_data[start : start + self.sequence_length]
-        target_data = self.grouped_data[start + self.prediction_horizon : end]
+        target_data = self.grouped_data[start + self.sequence_length : end]
+
+        # Ensure we have the correct number of time steps
+        sequence_data = sequence_data[: self.sequence_length]
+        target_data = target_data[: self.prediction_horizon]
+
+        # Pad if necessary
+        if len(sequence_data) < self.sequence_length:
+            sequence_data = sequence_data + [sequence_data[-1]] * (
+                self.sequence_length - len(sequence_data)
+            )
+        if len(target_data) < self.prediction_horizon:
+            target_data = target_data + [target_data[-1]] * (
+                self.prediction_horizon - len(target_data)
+            )
+
+        # Extract and convert timestamps
+        def convert_timestamp(group):
+            timestamp = group[1]["IST_Time"].mean()
+            if isinstance(timestamp, datetime):
+                return (timestamp - datetime(1970, 1, 1)).total_seconds()
+            elif isinstance(timestamp, np.datetime64):
+                return (
+                    timestamp - np.datetime64("1970-01-01T00:00:00Z")
+                ) / np.timedelta64(1, "s")
+            else:
+                raise ValueError(f"Unexpected timestamp type: {type(timestamp)}")
+
+        sequence_timestamps = [convert_timestamp(group) for group in sequence_data]
+        target_timestamps = [convert_timestamp(group) for group in target_data]
 
         # Interpolate sequence data to grid
         sequence_s4 = np.stack(
             [
                 interpolate_to_grid(
-                    group[1][["Longitude", "Latitude"]].to_numpy(),
+                    group[1][["Latitude", "Longitude"]].to_numpy(),
                     group[1]["Vertical S4"].to_numpy(),
-                    self.grid_lon,
                     self.grid_lat,
+                    self.grid_lon,
                 )
                 for group in sequence_data
             ]
         )
-
         sequence_phase = np.stack(
             [
                 interpolate_to_grid(
-                    group[1][["Longitude", "Latitude"]].to_numpy(),
+                    group[1][["Latitude", "Longitude"]].to_numpy(),
                     group[1]["Vertical Scintillation Phase"].to_numpy(),
-                    self.grid_lon,
                     self.grid_lat,
+                    self.grid_lon,
                 )
                 for group in sequence_data
             ]
@@ -346,40 +432,33 @@ class IonosphereDataset(Dataset):
         target_s4 = np.stack(
             [
                 interpolate_to_grid(
-                    group[1][["Longitude", "Latitude"]].to_numpy(),
+                    group[1][["Latitude", "Longitude"]].to_numpy(),
                     group[1]["Vertical S4"].to_numpy(),
-                    self.grid_lon,
                     self.grid_lat,
+                    self.grid_lon,
                 )
                 for group in target_data
             ]
         )
-
         target_phase = np.stack(
             [
                 interpolate_to_grid(
-                    group[1][["Longitude", "Latitude"]].to_numpy(),
+                    group[1][["Latitude", "Longitude"]].to_numpy(),
                     group[1]["Vertical Scintillation Phase"].to_numpy(),
-                    self.grid_lon,
                     self.grid_lat,
+                    self.grid_lon,
                 )
                 for group in target_data
             ]
         )
 
         return {
-            "features_s4": torch.from_numpy(
-                sequence_s4
-            ).float(),  # [seq_len, lat_steps, lon_steps]
-            "features_phase": torch.from_numpy(
-                sequence_phase
-            ).float(),  # [seq_len, lat_steps, lon_steps]
-            "target_s4": torch.from_numpy(
-                target_s4
-            ).float(),  # [pred_horizon, lat_steps, lon_steps]
-            "target_phase": torch.from_numpy(
-                target_phase
-            ).float(),  # [pred_horizon, lat_steps, lon_steps]
+            "features_s4": torch.from_numpy(sequence_s4).float(),
+            "features_phase": torch.from_numpy(sequence_phase).float(),
+            "target_s4": torch.from_numpy(target_s4).float(),
+            "target_phase": torch.from_numpy(target_phase).float(),
+            "sequence_timestamps": torch.tensor(sequence_timestamps).float(),
+            "target_timestamps": torch.tensor(target_timestamps).float(),
         }
 
 
@@ -389,8 +468,8 @@ class IonosphereDataModule(LightningDataModule):
         dataframe: pl.DataFrame,
         sequence_length: int,
         prediction_horizon: int,
-        grid_lon_range: Tuple[float, float],
         grid_lat_range: Tuple[float, float],
+        grid_lon_range: Tuple[float, float],
         grid_resolution: float,
         time_window: str,
         stride: int,
@@ -402,16 +481,13 @@ class IonosphereDataModule(LightningDataModule):
         self.dataframe = dataframe
 
         # Create grid
-        self.grid_lon, self.grid_lat = create_grid(
-            grid_lon_range, grid_lat_range, grid_resolution
+        self.grid_lat, self.grid_lon = create_grid(
+            grid_lat_range, grid_lon_range, grid_resolution
         )
 
         # Compute grid steps
-        self.grid_lon_steps = len(self.grid_lon)
         self.grid_lat_steps = len(self.grid_lat)
-
-        # Calculate input size dynamically
-        self.input_size = self.grid_lon_steps * self.grid_lat_steps * 2
+        self.grid_lon_steps = len(self.grid_lon)
 
     def setup(self, stage=None):
         train_df, val_df, test_df = self._split_data()
@@ -419,8 +495,8 @@ class IonosphereDataModule(LightningDataModule):
         dataset_params = dict(
             sequence_length=self.hparams.sequence_length,
             prediction_horizon=self.hparams.prediction_horizon,
-            lon_range=self.hparams.grid_lon_range,
             lat_range=self.hparams.grid_lat_range,
+            lon_range=self.hparams.grid_lon_range,
             grid_resolution=self.hparams.grid_resolution,
             time_window=self.hparams.time_window,
             stride=self.hparams.stride,
@@ -441,24 +517,28 @@ class IonosphereDataModule(LightningDataModule):
         )
 
     def train_dataloader(self) -> DataLoader:
-        return self._create_dataloader(self.train_dataset, shuffle=True)
-
-    def val_dataloader(self) -> DataLoader:
-        return self._create_dataloader(self.val_dataset, shuffle=False)
-
-    def test_dataloader(self) -> DataLoader:
-        return self._create_dataloader(self.test_dataset, shuffle=False)
-
-    def _create_dataloader(self, dataset: Dataset, shuffle: bool) -> DataLoader:
-        def collate_fn(batch):
-            collated = torch.utils.data.dataloader.default_collate(batch)
-            return collated
-
         return DataLoader(
-            dataset,
+            self.train_dataset,
             batch_size=self.hparams.batch_size,
-            shuffle=shuffle,
+            shuffle=True,
             num_workers=self.hparams.num_workers,
             pin_memory=True,
-            collate_fn=collate_fn,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.hparams.batch_size,
+            shuffle=False,
+            num_workers=self.hparams.num_workers,
+            pin_memory=True,
+        )
+
+    def test_dataloader(self) -> DataLoader:
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.hparams.batch_size,
+            shuffle=False,
+            num_workers=self.hparams.num_workers,
+            pin_memory=True,
         )

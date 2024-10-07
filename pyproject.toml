@@ -26,7 +26,8 @@ matplotlib = "^3.9.1"
 kaleido = "0.2.1"
 streamlit = "^1.37.0"
 mlflow = "^2.16.2"
-darts = "^0.30.0"
+darts = {extras = ["all"], version = "^0.30.0"}
+u8darts = {extras = ["all"], version = "^0.30.0"}
 
 
 [build-system]

@@ -17,9 +17,9 @@ def create_grid(
     grid_lat = np.arange(lat_start, lat_end + grid_resolution, grid_resolution)
     grid_lon = np.arange(lon_start, lon_end + grid_resolution, grid_resolution)
 
-    print("Created grid - Lat range:", grid_lat.min(), grid_lat.max())
-    print("Created grid - Lon range:", grid_lon.min(), grid_lon.max())
-    print("Grid shape:", grid_lat.shape, grid_lon.shape)
+    # print("Created grid - Lat range:", grid_lat.min(), grid_lat.max())
+    # print("Created grid - Lon range:", grid_lon.min(), grid_lon.max())
+    # print("Grid shape:", grid_lat.shape, grid_lon.shape)
 
     return grid_lat, grid_lon
 
@@ -34,8 +34,8 @@ def preprocess_data(
     grid_resolution: float,
     error_margin: str = "5s",
 ) -> Tuple[TimeSeries, TimeSeries]:
-    print("Initial data shape:", df.shape)
-    print("NaN in initial data:", df.null_count().sum())
+    # print("Initial data shape:", df.shape)
+    # print("NaN in initial data:", df.null_count().sum())
 
     # Sort the DataFrame by time
     df = df.sort("IST_Time")
@@ -47,21 +47,21 @@ def preprocess_data(
     grouped_data = custom_group_by_dynamic(
         df, "IST_Time", every, period, offset, error_margin
     )
-    print("Number of groups:", len(grouped_data))
+    # print("Number of groups:", len(grouped_data))
 
     # Apply grid aggregation
     results = apply_grid_aggregate(grouped_data, grid_agg)
-    print("Number of results:", len(results))
+    # print("Number of results:", len(results))
 
     # Extract data from results
     timestamps = pd.DatetimeIndex([r["timestamp"] for r in results])
     s4_data = np.array([r["gridded_data"][0].flatten() for r in results])
     phase_data = np.array([r["gridded_data"][1].flatten() for r in results])
 
-    print("S4 data shape:", s4_data.shape)
-    print("Phase data shape:", phase_data.shape)
-    print("NaN in S4 data:", np.isnan(s4_data).sum())
-    print("NaN in Phase data:", np.isnan(phase_data).sum())
+    # print("S4 data shape:", s4_data.shape)
+    # print("Phase data shape:", phase_data.shape)
+    # print("NaN in S4 data:", np.isnan(s4_data).sum())
+    # print("NaN in Phase data:", np.isnan(phase_data).sum())
 
     # Create TimeSeries objects
     s4_series = TimeSeries.from_times_and_values(timestamps, s4_data)
@@ -101,13 +101,13 @@ def idw_interpolation(points, values, grid_lat, grid_lon, power=2, smoothing=1e-
     # Interpolate
     interpolated = (weights * valid_values[:, None]).sum(axis=0)
 
-    print("Interpolation result shape:", interpolated.shape)
-    print(
-        "Zero percentage after interpolation:",
-        (interpolated == 0).sum() / interpolated.size * 100,
-    )
+    # print("Interpolation result shape:", interpolated.shape)
+    # print(
+    #     "Zero percentage after interpolation:",
+    #     (interpolated == 0).sum() / interpolated.size * 100,
+    # )
 
-    return interpolated
+    return interpolated.flatten()
 
 
 def direct_binning(points, values, grid_lat, grid_lon):
@@ -131,12 +131,12 @@ def average_time_windows(current_window, prev_window, next_window):
 def interpolate_to_grid(
     points, values, grid_lat, grid_lon, prev_window=None, next_window=None
 ):
-    print("Number of input points:", len(points))
-    print("Input points range - Lat:", points[:, 0].min(), points[:, 0].max())
-    print("Input points range - Lon:", points[:, 1].min(), points[:, 1].max())
-    print("Grid Lat range:", grid_lat.min(), grid_lat.max())
-    print("Grid Lon range:", grid_lon.min(), grid_lon.max())
-    print("Number of non-NaN input values:", np.sum(~np.isnan(values)))
+    # print("Number of input points:", len(points))
+    # print("Input points range - Lat:", points[:, 0].min(), points[:, 0].max())
+    # print("Input points range - Lon:", points[:, 1].min(), points[:, 1].max())
+    # print("Grid Lat range:", grid_lat.min(), grid_lat.max())
+    # print("Grid Lon range:", grid_lon.min(), grid_lon.max())
+    # print("Number of non-NaN input values:", np.sum(~np.isnan(values)))
 
     grid_x, grid_y = np.meshgrid(grid_lon, grid_lat)
 
@@ -164,7 +164,7 @@ def interpolate_to_grid(
 
     interpolated = np.clip(interpolated, 0, None)
 
-    return interpolated.flatten()
+    return interpolated
 
 
 def custom_group_by_dynamic(

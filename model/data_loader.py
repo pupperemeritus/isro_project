@@ -3,36 +3,39 @@ import logging.config
 import os
 import warnings
 from datetime import datetime, timedelta
-from functools import partial
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import polars as pl
 import streamlit as st
 import torch
 from pytorch_lightning import LightningDataModule
-from scipy.interpolate import griddata, interp1d
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from torch.utils.data import DataLoader, Dataset
-from scipy.stats import binned_statistic_2d
+
+from model.validation_functions import check_nan_and_inf  # Import
+from model.validation_functions import (  # Import validation functions, not decorators
+    validate_dataframe_columns,
+    validate_column_data_types,
+)
 
 warnings.filterwarnings("ignore")
 
+from model.logging_conf import get_logger  # Import get_logger for standardized logging
+from model.grid_utils import create_grid, interpolate_to_grid  # NEW IMPORT
 
-logger = logging.Logger(__name__)
+logger = get_logger(__name__)  # Initialize logger using get_logger()
 
 
 def calculate_single_lat_lon(
-    elevation: float, azimuth: float, user_lat: float = 17.39, user_long: float = 78.31
+    elevation: float, azimuth: float, user_lat: float = 17.39, user_lon: float = 78.31
 ):
     logger.debug(
-        f"Calculating lat/lon for: el={elevation}, az={azimuth}, user_lat={user_lat}, user_lon={user_long}"
+        f"Calculating lat/lon for: el={elevation}, az={azimuth}, user_lat={user_lat}, user_lon={user_lon}"
     )
     e_rad = elevation * (np.pi / 180)
     a_rad = azimuth * (np.pi / 180)
     user_lat_rad = user_lat * (np.pi / 180)
-    user_long_rad = user_long * (np.pi / 180)
+    user_long_rad = user_lon * (np.pi / 180)
 
     earth_center_angle = (90 * (np.pi / 180)) - e_rad - np.arcsin(0.94 * np.cos(e_rad))
     earth_center_angle = max(0, earth_center_angle)
@@ -60,7 +63,10 @@ def add_lat_lon_to_df(
 ):
     logger.info("Adding latitude and longitude to dataframe")
     lat, lon = calculate_lat_lon(
-        df[elevation_col].to_numpy(), df[azimuth_col].to_numpy(), user_lat, user_lon
+        df.select(elevation_col).to_numpy().flatten(),  # Use Polars select and flatten
+        df.select(azimuth_col).to_numpy().flatten(),  # Use Polars select and flatten
+        user_lat,
+        user_lon,
     )
     df = df.with_columns([pl.Series("Latitude", lat), pl.Series("Longitude", lon)])
     logger.debug("Latitude and Longitude columns added")
@@ -104,113 +110,160 @@ def calculate_lat_lon(
 
 
 def slant_to_vertical(df: pl.DataFrame):
-    e_rad = df["Elevation"].to_numpy()
-    radius_earth_km = 6378
-    height_ipp_km = 350
+    logger.info("Converting slant S4 and Phase to vertical...")
+    try:
+        e_rad = df["Elevation"].to_numpy()
+        radius_earth_km = 6378
+        height_ipp_km = 350
 
-    p = (
-        df[
-            "p on Sig1, spectral slope of detrended phase in the 0.1 to 25Hz range (dimensionless)"
-        ]
-        .cast(pl.Float64)
-        .to_numpy()
-    )
+        p = (
+            df[
+                "p on Sig1, spectral slope of detrended phase in the 0.1 to 25Hz range (dimensionless)"
+            ]
+            .cast(pl.Float64)
+            .to_numpy()
+        )
 
-    amplitude_scintillation_slant = df["S4"].to_numpy()
+        amplitude_scintillation_slant = df["S4"].to_numpy()
 
-    term_1 = radius_earth_km * np.cos(e_rad) / (radius_earth_km + height_ipp_km)
-    term_2 = np.sqrt(1 - term_1**2)
-    term_3 = (1 / term_2) ** (p + 0.25)
-    vertical_scintillation_amplitude = pl.Series(
-        "Vertical S4", amplitude_scintillation_slant / term_3
-    ).fill_nan(np.nanmean(amplitude_scintillation_slant / term_3))
+        term_1 = radius_earth_km * np.cos(e_rad) / (radius_earth_km + height_ipp_km)
+        term_2 = np.sqrt(1 - term_1**2)
+        term_3 = (1 / term_2) ** (p + 0.25)
+        vertical_scintillation_amplitude = pl.Series(
+            "Vertical S4", amplitude_scintillation_slant / term_3
+        ).fill_nan(np.nanmean(amplitude_scintillation_slant / term_3))
 
-    phase_scintillation_rad = df[
-        "Phi60 on Sig1, 60-second phase sigma (radians)"
-    ].to_numpy()
+        phase_scintillation_rad = df[
+            "Phi60 on Sig1, 60-second phase sigma (radians)"
+        ].to_numpy()
 
-    term_4 = (1 / term_2) ** (0.5)
-    vertical_scintillation_phase = pl.Series(
-        "Vertical Scintillation Phase", phase_scintillation_rad / term_4
-    ).fill_nan(np.nanmean(phase_scintillation_rad))
+        term_4 = (1 / term_2) ** (0.5)
+        vertical_scintillation_phase = pl.Series(
+            "Vertical Scintillation Phase", phase_scintillation_rad / term_4
+        ).fill_nan(np.nanmean(phase_scintillation_rad))
 
-    df.insert_column(
-        -1,
-        vertical_scintillation_amplitude,
-    )
-    df.insert_column(-1, vertical_scintillation_phase)
-
-    return df
+        df.insert_column(
+            -1,
+            vertical_scintillation_amplitude,
+        )
+        df.insert_column(-1, vertical_scintillation_phase)
+        logger.info("Slant to vertical conversion completed.")
+        return df
+    except Exception as e:
+        logger.error(f"Error during slant to vertical conversion: {e}", exc_info=True)
+        raise
 
 
 def preprocess_dataframe(
     df: pl.DataFrame, user_lat: float, user_lon: float
-) -> pl.DataFrame:
-    df = slant_to_vertical(df)
-    df = add_lat_lon_to_df(df, "Elevation", "Azimuth", user_lat, user_lon)
-    df = df.with_columns(
-        [
-            pl.struct(["GPS_WN", "GPS_TOW"])
-            .map_elements(
-                lambda x: gps_to_ist(x["GPS_WN"], x["GPS_TOW"]), return_dtype=datetime
-            )
-            .alias("IST_Time")
-        ]
-    )
-    df = df.drop_nulls(
-        subset=[
-            "GPS_WN",
-            "GPS_TOW",
-            "SVID",
-            "Azimuth",
-            "Elevation",
-            "S4",
-            "Latitude",
-            "Longitude",
-        ]
-    ).drop(
-        [
-            "GPS_WN",
-            "GPS_TOW",
-            "Azimuth",
-            "Elevation",
-            "SVID",
-            "sbf2ismr version number",
-            "Value of the RxState field of the ReceiverStatus SBF block",
-        ]
-    )
-    # Calculate the null percentage for each column
-    null_percentage = df.select(
-        [
-            (pl.col(c).is_null().sum() / pl.col(c).count() * 100).alias(c)
-            for c in df.columns
-        ]
-    )
+) -> pl.DataFrame | None:
+    logger.info("Preprocessing dataframe...")
+    try:
+        df = slant_to_vertical(df)
+        df = add_lat_lon_to_df(df, "Elevation", "Azimuth", user_lat, user_lon)
+        df = df.with_columns(
+            [
+                pl.struct(["GPS_WN", "GPS_TOW"])
+                .map_elements(
+                    lambda x: gps_to_ist(x["GPS_WN"], x["GPS_TOW"]),
+                    return_dtype=datetime,
+                )
+                .alias("IST_Time")
+            ]
+        )
+        df = df.drop_nulls(
+            subset=[
+                "GPS_WN",
+                "GPS_TOW",
+                "SVID",
+                "Azimuth",
+                "Elevation",
+                "S4",
+                "Latitude",
+                "Longitude",
+            ]
+        ).drop(
+            [
+                "GPS_WN",
+                "GPS_TOW",
+                "Azimuth",
+                "Elevation",
+                "SVID",
+                "sbf2ismr version number",
+                "Value of the RxState field of the ReceiverStatus SBF block",
+            ]
+        )
+        # Calculate the null percentage for each column
+        null_percentage = df.select(
+            [
+                (pl.col(c).is_null().sum() / pl.col(c).count() * 100).alias(c)
+                for c in df.columns
+            ]
+        )
 
-    # Find columns with null percentage <= 40%
-    valid_columns = [
-        col for col in null_percentage.columns if null_percentage[col][0] <= 40
+        # Find columns with null percentage <= 40%
+        valid_columns = [
+            col for col in null_percentage.columns if null_percentage[col][0] <= 40
+        ]
+
+        if not valid_columns:
+            logger.warning("No valid columns found after null percentage filtering.")
+            return None  # Or raise an exception if valid columns are required
+
+        # Select only valid columns
+        df = df.select(valid_columns)
+        logger.info("Dataframe preprocessing completed.")
+        return df
+    except Exception as e:
+        logger.error(f"Error during dataframe preprocessing: {e}", exc_info=True)
+        raise
+
+
+def verify_dataframe(df: pl.DataFrame) -> pl.DataFrame:
+    required_columns = [
+        "IST_Time",
+        "Latitude",
+        "Longitude",
+        "Vertical S4",
+        "Vertical Scintillation Phase",
     ]
-
-    # Select only valid columns
-    df = df.select(valid_columns)
+    validate_dataframe_columns(df, required_columns)
+    # Specify expected types (adjust as needed)
+    column_types = {
+        "Vertical S4": pl.Float64,
+        "Vertical Scintillation Phase": pl.Float64,
+    }
+    validate_column_data_types(df, column_types)
+    check_nan_and_inf(df, required_columns)
     return df
 
 
 def load_data(file: str) -> Optional[pl.DataFrame]:
+    logger.info(f"Starting to load data from file: {file}")
     try:
-        logger.info(f"Starting to load data from file: {file}")
+        if not os.path.exists(file):
+            logger.error(f"Data file not found: {file}", exc_info=True)
+            raise FileNotFoundError(f"Data file not found: {file}")
+
         if file.endswith(".arrow"):
+            logger.info(f"Loading Arrow file: {file}")
             df = pl.read_ipc(file)
         elif file.endswith(".csv"):
+            logger.info(f"Loading CSV file: {file}")
             df = pl.read_csv(file)
         elif file.endswith(".parquet"):
+            logger.info(f"Loading Parquet file: {file}")
             df = pl.read_parquet(file)
         else:
-            raise ValueError("Unsupported file format")
+            logger.error(
+                "Unsupported file format. Supported formats are: .arrow, .csv, .parquet"
+            )
+            raise ValueError(
+                "Unsupported file format. Supported formats are: .arrow, .csv, .parquet"
+            )
 
         if df.is_empty():
-            logger.warning("Loaded empty DataFrame")
+            logger.warning("Loaded DataFrame is empty.")
             return None
 
         required_columns = [
@@ -224,8 +277,10 @@ def load_data(file: str) -> Optional[pl.DataFrame]:
 
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
-            logger.error(f"Missing required columns: {', '.join(missing_columns)}")
-            return None
+            logger.error(
+                f"Missing required columns: {', '.join(missing_columns)}", exc_info=True
+            )
+            raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
 
         df = df.rename(
             {
@@ -236,91 +291,47 @@ def load_data(file: str) -> Optional[pl.DataFrame]:
                 "Total S4 on Sig1 (dimensionless)": "S4",
             }
         )
-
+        logger.info(
+            "Initial data loading and renaming completed. Proceeding to preprocess dataframe."
+        )
         df = preprocess_dataframe(df, user_lat=17.39, user_lon=78.31)
-        logger.info(f"Data loaded successfully. Shape: {df.shape}")
+        # NEW: verify dataframe integrity using validation functions
+        if df is not None:
+            df = verify_dataframe(df)
+        validate_dataframe_columns(
+            df,
+            required_columns=[
+                "IST_Time",
+                "Latitude",
+                "Longitude",
+                "Vertical S4",
+                "Vertical Scintillation Phase",
+            ],
+        )
+        if df is None:  # preprocess_dataframe can return None if no valid columns
+            logger.warning(
+                "Preprocessing dataframe returned None (no valid columns). Data loading failed."
+            )
+            return None
+
+        logger.info(f"Data loaded and preprocessed successfully. Shape: {df.shape}")
         return df
-    except Exception as e:
-        logger.exception(f"Error loading data: {str(e)}")
-        return None
 
-
-def create_grid(
-    lat_range,
-    lon_range,
-    grid_resolution,
-):
-    lat_start, lat_end = lat_range
-    lon_start, lon_end = lon_range
-
-    grid_lat = np.arange(lat_start, lat_end + grid_resolution, grid_resolution)
-    grid_lon = np.arange(lon_start, lon_end + grid_resolution, grid_resolution)
-
-    return grid_lat, grid_lon
-
-
-def interpolate_to_grid(
-    points,
-    values,
-    grid_lat,
-    grid_lon,
-    min_points=4,
-):
-    if len(points) < min_points:
-        print(
-            f"Not enough points for interpolation. Using binning instead. Points: {len(points)}"
-        )
-        return bin_to_grid(points, values, grid_lat, grid_lon)
-
-    grid_x, grid_y = np.meshgrid(grid_lon, grid_lat)
-
-    try:
-        interpolated = griddata(
-            points,
-            values,
-            (grid_x, grid_y),
-            method="linear",
-            fill_value=np.nan,
-        )
-
-        # If interpolation produced all NaN values, fall back to binning
-        if np.all(np.isnan(interpolated)):
-            print("Interpolation resulted in all NaN values. Falling back to binning.")
-            return bin_to_grid(points, values, grid_lat, grid_lon)
-
-        # Fill any remaining NaN values using binning
-        nan_mask = np.isnan(interpolated)
-        if np.any(nan_mask):
-            binned = bin_to_grid(points, values, grid_lat, grid_lon)
-            interpolated[nan_mask] = binned[nan_mask]
-
-        return interpolated
+    except FileNotFoundError as e:
+        logger.error(f"File not found error during data loading: {e}", exc_info=True)
+        return None  # Handle FileNotFoundError specifically and return None
 
     except ValueError as e:
-        print(f"Interpolation failed: {e}. Falling back to binning.")
-        return bin_to_grid(points, values, grid_lat, grid_lon)
+        logger.error(
+            f"Value error during data loading or preprocessing: {e}", exc_info=True
+        )
+        return None  # Handle ValueError and return None
 
-
-def bin_to_grid(points, values, grid_lat, grid_lon):
-    lat_min, lat_max = np.min(grid_lat), np.max(grid_lat)
-    lon_min, lon_max = np.min(grid_lon), np.max(grid_lon)
-
-    binned, _, _, _ = binned_statistic_2d(
-        points[:, 1],  # Longitude
-        points[:, 0],  # Latitude
-        values,
-        bins=[len(grid_lon), len(grid_lat)],
-        statistic="mean",
-        range=[[lon_min, lon_max], [lat_min, lat_max]],
-    )
-
-    # Transpose the binned data to match the expected shape (lat, lon)
-    binned = binned.T
-
-    # Fill NaN values with 0 or another appropriate value
-    binned = np.nan_to_num(binned, 0)
-
-    return binned
+    except Exception as e:
+        logger.exception(
+            f"Unexpected error during data loading: {e}"
+        )  # Use logger.exception for full traceback
+        return None  # Catch any other exceptions and return None
 
 
 class IonosphereDataset(Dataset):
@@ -335,6 +346,17 @@ class IonosphereDataset(Dataset):
         grid_resolution: float,
         stride: int,
     ):
+        # NEW: Verify dataframe in dataset initialization
+        check_nan_and_inf(
+            dataframe,
+            [
+                "IST_Time",
+                "Latitude",
+                "Longitude",
+                "Vertical S4",
+                "Vertical Scintillation Phase",
+            ],
+        )
         self.df = dataframe.sort("IST_Time")
         self.time_window = time_window
         self.sequence_length = sequence_length

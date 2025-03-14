@@ -14,10 +14,10 @@ openpyxl = "^3.1.5"
 pyarrow = "^16.1.0"
 scipy = "^1.14.0"
 polars = "^1.2.1"
-torch = "^2.3.1"
-lightning = "^2.4.0"
+torch = "^2.6.0"
+lightning = "^2.5.0.post0"
 tensorrt = "^10.2.0.post1"
-torchvision = "^0.18.1"
+torchvision = "^0.21.0"
 ipykernel = "^6.29.5"
 scikit-learn = "^1.5.1"
 nbdime = "^4.0.1"
@@ -29,6 +29,13 @@ mlflow = "^2.16.2"
 darts = {extras = ["all"], version = "^0.30.0"}
 u8darts = {extras = ["all"], version = "^0.30.0"}
 prophet = "^1.1.6"
+rich = "^13.9.4"
+zarr = "^3.0.5"
+graphcast = {url = "https://github.com/deepmind/graphcast/archive/master.zip"}
+jax = {version = "0.5.0", extras = ["cuda"]}
+jaxlib = "0.5.0"
+optax = "^0.2.4"
+mlstm-kernels = "^1.0.3"
 
 
 [build-system]

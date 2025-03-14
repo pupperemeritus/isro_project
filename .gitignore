@@ -121,3 +121,5 @@ lightning_logs
 tb_logs
 checkpoints
 mlruns
+*.zarr
+cache

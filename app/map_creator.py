@@ -141,7 +141,7 @@ def create_map(
                         mapbox=dict(center=dict(lat=20, lon=82.5), zoom=4),
                     )
             case _:
-                logger.error(f"Unsupported map type: {map_type}")
+                logger.error(f"Unsupported map type: {map_type}", exc_info=True)
                 return go.Figure()
 
         fig.update_layout(

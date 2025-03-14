@@ -48,7 +48,9 @@ def load_data(file: UploadedFile) -> Optional[pl.DataFrame]:
         # Polars uses a different method to check for missing columns
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
-            logger.error(f"Missing required columns: {', '.join(missing_columns)}")
+            logger.error(
+                f"Missing required columns: {', '.join(missing_columns)}", exc_info=True
+            )
             return None
 
         logger.debug("Renaming columns for easier handling")

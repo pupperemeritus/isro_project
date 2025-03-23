@@ -291,6 +291,7 @@ def load_data(file: str) -> Optional[pl.DataFrame]:
                 "Total S4 on Sig1 (dimensionless)": "S4",
             }
         )
+        logger.debug(f"Columns after renaming: {df.columns}")
         logger.info(
             "Initial data loading and renaming completed. Proceeding to preprocess dataframe."
         )

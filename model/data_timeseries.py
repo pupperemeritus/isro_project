@@ -116,6 +116,8 @@ def custom_group_by_dynamic(
             windows.append((window_start, window_end))
             current_time += every_td
 
+        logger.debug(f"Generated {len(windows)} time windows.")
+
         grouped_data = []
         for window_start, window_end in windows:
             window_data = pdf[

@@ -28,14 +28,12 @@ from model.data_timeseries import preprocess_data, split_data
 from model.logging_conf import get_logger, setup_logging
 from model.metrics import calculate_metrics
 from rich.table import Table
-from model.mlstm_utils import (
-    FeedForward,  # Importing mLSTM components
-    mLSTMBlock,
-    mLSTMLayer,
-    mLSTMLayerConfig,
-    xLSTMLargeBlockStack,
-    xLSTMLargeConfig,
-)
+from xlstm import xLSTMBlockStack, xLSTMBlockStackConfig
+from xlstm.blocks.mlstm.block import mLSTMBlockConfig
+from xlstm.blocks.slstm.block import sLSTMBlockConfig
+from xlstm.components.feedforward import FeedForwardConfig
+from xlstm.blocks.mlstm.layer import mLSTMLayerConfig
+from xlstm.blocks.slstm.layer import sLSTMLayerConfig
 
 
 def cache_data(data, cache_path):
@@ -62,146 +60,170 @@ console = Console()
 
 class GridMSELoss(nn.Module):  # type: ignore[valid-type, misc]
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-        # Assuming y_pred and y_true are of shape (batch_size, output_chunk_length, grid_cells, features)
+        # Ensure both inputs have 4 dimensions: (batch, seq, grid_cells, features).
+        if y_pred.dim() == 3:
+            y_pred = y_pred.unsqueeze(2)  # add grid_cells=1
+            y_true = y_true.unsqueeze(2)
         return torch.mean((y_pred - y_true) ** 2)
 
 
-class EnhancedLSTM(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        num_layers: int,
-        output_dim: int,
-        dropout: float = 0.2,
-        variant: Optional[str] = "XLSTM",  # Changed default to XLSTM
-    ):
+class SpatialWeightedMSE(nn.Module):
+    def __init__(self, alpha=0.5, beta=0.5):
         super().__init__()
-        self.variant = variant
-
-        # Increase network capacity for outlier patterns
-        self.hidden_multiplier = 2  # Doubled capacity
-        hidden_dim = hidden_dim * self.hidden_multiplier
-
-        self.batch_norm_input = BatchNorm1d(input_dim)
-
-        # mLSTM Config - you can customize this further
-        mlstm_config = xLSTMLargeConfig(
-            embedding_dim=hidden_dim,  # hidden_dim is embedding dim for mLSTM
-            num_heads=8,  # Example, adjust as needed
-            num_blocks=num_layers,  # Use num_layers as num_blocks for mLSTM stack
-            vocab_size=1,  # Vocab size not relevant for time series, set to 1
-            return_last_states=False,  # No states returned in training mode
-            mode="train",  # Set mode to train
-            weight_mode="single",  # Or "fused" - experiment
-        )
-        self.mlstm_stack = xLSTMLargeBlockStack(mlstm_config)
-
-        self.batch_norm1 = BatchNorm1d(hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.fc1 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.batch_norm2 = BatchNorm1d(hidden_dim // 2)
-        self.dropout2 = nn.Dropout(dropout / 2.0)
-        self.fc2 = nn.Linear(hidden_dim // 2, output_dim)
-        self.activation = nn.GELU()
-        self.final_activation = nn.ReLU()
-
-        # Remove TLSTM-specific components
-        if self.variant == "XLSTM":  # Simplified variant check
-            self.residual_fc = nn.Linear(input_dim, output_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Scale input while preserving outliers
-        x_shape = x.shape
-        x_reshaped = x.view(-1, x_shape[-1])
-        # Removed erroneous conversion from numpy
-        x_norm = x_reshaped.float().to(x.device)
-        x_norm = x_norm.view(x_shape)
-
-        # Apply batch norm to input
-        x_norm = x_norm.transpose(1, 2)
-        x_norm = self.batch_norm_input(x_norm)
-        x_norm = x_norm.transpose(1, 2)
-
-        # Pass through mLSTM stack
-        mlstm_out, _ = self.mlstm_stack(
-            x_norm, state=None
-        )  # State is None for now - state management needs more consideration
-        mlstm_out = mlstm_out[:, -1:, :]  # Take only the last time step output
-
-        # Apply batch norm after mLSTM
-        mlstm_out_bn = mlstm_out.transpose(1, 2)
-        mlstm_out_bn = self.batch_norm1(mlstm_out_bn)
-        mlstm_out_bn = mlstm_out_bn.transpose(1, 2)
-        out = self.dropout(mlstm_out_bn)
-
-        out = self.fc1(out)
-        out = out.transpose(1, 2)
-        out = self.batch_norm2(out)
-        out = out.transpose(1, 2)
-        out = self.activation(out)
-        out = self.dropout2(out)
-        out = self.fc2(out)
-
-        if self.variant == "XLSTM":  # Simplified variant check
-            residual = self.residual_fc(x_norm)
-            out = out + residual
-
-            # Use ReLU instead of previous final activation to remove negatives
-            out = self.final_activation(out)
-
-        return out
-
-
-class SimpleLogCoshLoss(nn.Module):
-    def __init__(self, scale: float = 1.0, epsilon: float = 1e-4):
-        super().__init__()
-        self.scale = scale
-        self.epsilon = epsilon
+        self.alpha = alpha  # Weight for point-wise error
+        self.beta = beta  # Weight for spatial gradient error
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-        diff = y_pred - y_true
-        loss = torch.where(
-            torch.abs(diff) < self.epsilon,
-            0.5 * diff**2,
-            torch.log(torch.cosh(self.scale * diff)) / self.scale,
-        )
-        return torch.mean(loss)
+        # Ensure inputs have 4 dimensions: (batch, seq, grid_cells, features)
+        if y_pred.dim() == 3:
+            y_pred = y_pred.unsqueeze(2)
+            y_true = y_true.unsqueeze(2)
+
+        # Point-wise error
+        mse_error = torch.mean((y_pred - y_true) ** 2)
+
+        # Spatial gradient error (captures spatial relationships)
+        # Calculate differences across grid cells when applicable
+        if y_pred.size(2) > 1:  # Only if we have multiple grid cells
+            y_pred_grad = y_pred[:, :, 1:, :] - y_pred[:, :, :-1, :]
+            y_true_grad = y_true[:, :, 1:, :] - y_true[:, :, :-1, :]
+            grad_error = torch.mean((y_pred_grad - y_true_grad) ** 2)
+        else:
+            grad_error = 0
+
+        return self.alpha * mse_error + self.beta * grad_error
+
+
+class WeightedMSELoss(nn.Module):
+    def __init__(self, threshold=0.05, high_weight=10.0):
+        super().__init__()
+        self.threshold = threshold
+        self.high_weight = high_weight
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        # Ensure both inputs have 4 dimensions
+        if y_pred.dim() == 3:
+            y_pred = y_pred.unsqueeze(2)
+            y_true = y_true.unsqueeze(2)
+
+        # Create weights: higher values get more weight
+        weights = torch.ones_like(y_true)
+        weights = torch.where(y_true > self.threshold, self.high_weight, weights)
+
+        # Compute weighted MSE
+        squared_errors = (y_pred - y_true) ** 2
+        weighted_squared_errors = weights * squared_errors
+
+        return torch.mean(weighted_squared_errors)
 
 
 class CustomLSTMModule(PLPastCovariatesModule):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.loss_fn = GridMSELoss()
+        # For x-LSTM, you can still switch loss if needed (default here remains WeightedMSELoss)
+        loss_type = getattr(self.hparams, "loss_type", "weighted")
+        if loss_type == "grid":
+            self.loss_fn = GridMSELoss()
+        elif loss_type == "spatial":
+            self.loss_fn = SpatialWeightedMSE()
+        elif loss_type == "weighted":
+            self.loss_fn = WeightedMSELoss(threshold=0.05, high_weight=10.0)
+        else:
+            self.loss_fn = GridMSELoss()
+        self._build_lstm_model(self.train_sample)
+
+    def _build_lstm_model(
+        self,
+        train_sample: Tuple[
+            torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
+        ],
+    ) -> None:
+        # Restore original x-LSTM model configuration
+        input_dim = train_sample[0].shape[2]
+        output_dim = (
+            train_sample[1].shape[2] if train_sample[1] is not None else input_dim
+        )
+        #     embedding_dim=512,
+        # num_heads=4,
+        # num_blocks=6,
+        # vocab_size=2048,
+        # return_last_states=True,
+        # mode="inference",
+        # chunkwise_kernel="chunkwise--triton_xl_chunk", # xl_chunk == TFLA kernels
+        # sequence_kernel="native_sequence__triton",
+        # step_kernel="triton",
+        self.batch_norm_input = BatchNorm1d(input_dim)
+        xlstm_config = xLSTMBlockStackConfig(
+            mlstm_block=mLSTMBlockConfig(
+                mlstm=mLSTMLayerConfig(
+                    conv1d_kernel_size=4, qkv_proj_blocksize=4, num_heads=4
+                )
+            ),
+            slstm_block=sLSTMBlockConfig(
+                slstm=sLSTMLayerConfig(
+                    backend="cuda",
+                    num_heads=4,
+                    conv1d_kernel_size=4,
+                    bias_init="powerlaw_blockdependent",
+                ),
+                feedforward=FeedForwardConfig(proj_factor=1.3, act_fn="gelu"),
+            ),
+            context_length=256,
+            num_blocks=7,
+            embedding_dim=128,
+            slstm_at=[1],
+        )
+        self.mlstm_stack = xLSTMBlockStack(xlstm_config)
+        # self.batch_norm1 = BatchNorm1d(self.hparams.hidden_dim)
+        self.dropout = nn.Dropout(self.hparams.dropout)
+        self.fc = nn.Linear(self.hparams.hidden_dim, output_dim)
+        self.residual_fc = nn.Linear(input_dim, output_dim)
+        self._init_weights()
+
+    def _init_weights(self):
+        # Initialize output layer weights (as before)
+        nn.init.uniform_(self.fc.weight, 0, 1)
+        nn.init.constant_(self.fc.bias, 0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Debug: check input statistics (uncomment for investigation)
+        print("Input stats before norm:", x.min(), x.max(), x.mean())
+        b, seq, feat = x.shape
+        x = x.reshape(b * seq, feat)
+        x = self.batch_norm_input(x)
+        x = x.reshape(b, seq, feat)
+        # Forward through x-LSTM stack
+        mlstm_out, _ = self.mlstm_stack(x)
+        # Use only the last timestep
+        out = mlstm_out
+        # Debug: check mlstm output shape
+        print("mlstm output shape:", out.shape)
+        out = self.batch_norm1(out)
+        out = self.dropout(out)
+        out = self.fc(out)
+        residual = self.residual_fc(x)
+        out = out + residual
+        # Apply softplus (ensures positive outputs) but check if residual cancels it out
+        out = torch.nn.functional.softplus(out)
+        return out
 
     def configure_optimizers(self) -> Dict:
-        # Adjust optimizer for better outlier handling
         optimizer = torch.optim.AdamW(
             self.parameters(),
-            lr=0.001,  # Increased learning rate
-            weight_decay=0.0001,  # Reduced weight decay
-            betas=(0.9, 0.999),
-            eps=1e-8,
+            lr=0.0005,
+            weight_decay=0.01,
         )
 
-        def lr_lambda(epoch):
-            warmup_epochs = 5  # Reduced warmup period
-            if epoch < warmup_epochs:
-                return epoch / warmup_epochs
-            return 0.65 * (  # Slower decay
-                1
-                + np.cos(
-                    np.pi
-                    * (epoch - warmup_epochs)
-                    / (self.trainer.max_epochs - warmup_epochs)
-                )
-            )
+        # Simpler learning rate scheduler
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=5, verbose=True
+        )
 
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
+                "monitor": "val_loss",
                 "interval": "epoch",
                 "frequency": 1,
             },
@@ -243,36 +265,6 @@ class CustomLSTMModule(PLPastCovariatesModule):
         self.log("val_loss", loss)
         return loss
 
-    def _create_model(
-        self,
-        train_sample: Tuple[
-            torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]
-        ],
-    ) -> nn.Module:
-
-        # Input dimension is always taken from the sample's feature dimension
-        input_dim = train_sample[0].shape[2]  # single input tensor for mLSTM
-        output_dim = (
-            train_sample[1].shape[2] if train_sample[1] is not None else input_dim
-        )
-        lstm_kwargs = {
-            "input_dim": input_dim,  # corrected input_dim for mLSTM
-            "hidden_dim": self.hparams.hidden_dim,
-            "num_layers": self.hparams.n_rnn_layers,
-            "output_dim": output_dim,
-            "dropout": self.hparams.dropout,
-            "variant": self.model_variant,
-        }
-        return EnhancedLSTM(**lstm_kwargs)
-
-    def forward(
-        self, inputs: torch.Tensor  # Input is a single tensor for mLSTM
-    ) -> torch.Tensor:
-        """
-        Forward pass for mLSTM, expects single tensor input
-        """
-        return self.model(inputs)
-
 
 class CustomBlockRNNModel(BlockRNNModel):
     def __init__(
@@ -297,7 +289,7 @@ class CustomBlockRNNModel(BlockRNNModel):
             output_chunk_shift=output_chunk_shift,
             **kwargs,
         )
-        self._pl_module_class = CustomLSTMModule  # updated module reference
+        self._pl_module_class = CustomLSTMModule  # use restored x-LSTM module
 
 
 # ----- MAIN: Use the old working approach directly -----
@@ -305,7 +297,7 @@ if __name__ == "__main__":
     torch.set_autocast_enabled(True)
     torch.set_float32_matmul_precision("medium")
     # Define parameters
-    prediction_horizon = 15
+    prediction_horizon = 16
     grid_resolution = 2.5
     every = "15m"
     period = "30m"
@@ -314,17 +306,18 @@ if __name__ == "__main__":
 
     model_params = {
         "model": "LSTM",
-        "input_chunk_length": 45,  # Reduced back to original value
+        "input_chunk_length": 64,  # Reduced back to original value
         "output_chunk_length": prediction_horizon,
-        "n_rnn_layers": 12,  # Reduced layers
-        "hidden_dim": 256,  # Reduced complexity
+        "n_rnn_layers": 6,  # Reduced layers
+        "hidden_dim": 512,  # Reduced complexity
         "output_chunk_shift": 0,
         "model_variant": model_variant_type,  # Pass model variant to CustomBlockRNNModel
+        "loss_type": "grid",  # Options: "grid", "spatial", or "weighted"
     }
     training_params = {
         "batch_size": 32,
         "n_epochs": 500,  # Reduced epochs
-        "optimizer_kwargs": {"lr": 0.001},  # Adjusted learning rate
+        "optimizer_kwargs": {"lr": 0.0005},  # Adjusted learning rate
         "model_name": "CustomLSTMForecast",
         "pl_trainer_kwargs": {
             "accelerator": "gpu",
@@ -345,10 +338,10 @@ if __name__ == "__main__":
                 tracking_uri="mlruns",
             ),
             "precision": "32-true",
-            "gradient_clip_val": 0.5,
-            "accumulate_grad_batches": 2,
+            "gradient_clip_val": 1,
+            "accumulate_grad_batches": 1,
             "min_epochs": 25,
-            "max_epochs": 100,
+            "max_epochs": 500,
             "deterministic": True,
             "enable_checkpointing": True,
         },
@@ -431,7 +424,7 @@ if __name__ == "__main__":
             "model_variant"
         ],  # Pass model variant to CustomBlockRNNModel
     )
-
+    print(model)
     logger.info("Training model...")
     model.fit(s4_train, val_series=s4_val)
 

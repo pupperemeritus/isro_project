@@ -21,6 +21,9 @@ from typing import Literal
 from model.components import MultiHeadLayerNorm, RMSNorm, soft_cap
 from model.utils import round_up_to_next_multiple_of
 from model.generate import generate_tokens, get_sampling_fn
+import os
+
+os.environ["XLSTM_EXTRA_INCLUDE_PATHS"] = "/usr/local/include/cuda/:/usr/include/cuda/"
 
 mLSTMLayerStateType = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 mLSTMStateType = dict[int, mLSTMLayerStateType]
@@ -210,6 +213,8 @@ class xLSTMLargeBlockStack(nn.Module):
     def forward(
         self, x: torch.Tensor, state: mLSTMStateType | None = None
     ) -> tuple[torch.Tensor, mLSTMStateType]:
+        # Debug: log state before block processing
+        # print(f"[DEBUG] xLSTMLargeBlockStack: starting with state: {state is not None}")
         if state is None:
             state = {i: None for i in range(len(self.blocks))}
 
@@ -224,6 +229,7 @@ class xLSTMLargeBlockStack(nn.Module):
                 # we update the state in place in order to avoid creating new tensors
                 for state_idx in range(len(block_state)):
                     state[i][state_idx].copy_(block_state_new[state_idx])
+            # print(f"[DEBUG] Block {i}: output shape: {x.shape}")
 
         x = self.out_norm(x)
 
@@ -235,9 +241,11 @@ class FeedForward(nn.Module):
         super().__init__()
         self.config = config
 
-        self.up_proj_dim = round_up_to_next_multiple_of(
-            config.embedding_dim * config.ffn_proj_factor,
-            config.ffn_round_up_to_multiple_of,
+        self.up_proj_dim = int(
+            round_up_to_next_multiple_of(
+                config.embedding_dim * config.ffn_proj_factor,
+                config.ffn_round_up_to_multiple_of,
+            )
         )
 
         if self.config.weight_mode == "single":
@@ -313,8 +321,23 @@ class mLSTMLayer(nn.Module):
         super().__init__()
         self.config = config
 
-        self.v_dim = int(config.embedding_dim * config.v_dim_factor)
-        self.qk_dim = int(config.embedding_dim * config.qk_dim_factor)
+        # Ensure dimensions are proper multiples of num_heads
+        self.head_dim = config.embedding_dim // config.num_heads
+        self.v_dim = self.head_dim * config.num_heads
+        self.qk_dim = self.head_dim * config.num_heads
+
+        if self.config.weight_mode == "fused":
+            # Adjust projections for proper dimension handling
+            self.qkv_opreact = nn.Linear(
+                in_features=config.embedding_dim,
+                out_features=2 * self.qk_dim + 2 * self.v_dim,
+                bias=config.use_bias,
+            )
+            self.ifgate_preact = nn.Linear(
+                in_features=config.embedding_dim,
+                out_features=2 * config.num_heads,
+                bias=True,
+            )
 
         if self.config.weight_mode == "single":
             self.q = nn.Linear(
@@ -348,17 +371,6 @@ class mLSTMLayer(nn.Module):
                 out_features=self.config.num_heads,
                 bias=True,
             )
-        elif self.config.weight_mode == "fused":
-            self.qkv_opreact = nn.Linear(
-                in_features=self.config.embedding_dim,
-                out_features=2 * self.qk_dim + 2 * self.v_dim,
-                bias=self.config.use_bias,
-            )
-            self.ifgate_preact = nn.Linear(
-                in_features=self.config.embedding_dim,
-                out_features=2 * self.config.num_heads,
-                bias=True,
-            )
 
         self.ogate_act_fn = nn.Sigmoid()
         self.mlstm_backend = mLSTMBackend(config=self.config.mlstm_backend)
@@ -381,7 +393,26 @@ class mLSTMLayer(nn.Module):
         self, x: torch.Tensor, state: mLSTMLayerStateType | None = None
     ) -> tuple[torch.Tensor, mLSTMLayerStateType | None]:
         assert x.ndim == 3, f"Input must have shape [B, S, D], got {x.shape}"
-        B, S, _ = x.shape
+        B, S, D = x.shape
+        assert (
+            D == self.config.embedding_dim
+        ), f"Expected embedding dim {self.config.embedding_dim}, got {D}"
+
+        # Debug shapes
+        print(
+            f"[DEBUG] mLSTMLayer dims: qk_dim={self.qk_dim}, v_dim={self.v_dim}, head_dim={self.head_dim}"
+        )
+
+        if self.config.weight_mode == "fused":
+            qkv_opreact = self.qkv_opreact(x)  # [B, S, 4*D]
+            chunk_size = qkv_opreact.size(-1) // 4
+            q, k, v, o_preact = qkv_opreact.chunk(4, dim=-1)
+
+            if_preact = soft_cap(
+                self.ifgate_preact(x), cap_value=self.config.gate_soft_cap
+            )
+            i_preact, f_preact = if_preact.chunk(2, dim=-1)
+
         if self.config.weight_mode == "single":
             q = self.q(x)
             k = self.k(x)
@@ -394,30 +425,14 @@ class mLSTMLayer(nn.Module):
                 self.fgate_preact(x), cap_value=self.config.gate_soft_cap
             )
 
-        elif self.config.weight_mode == "fused":
-            qkv_opreact = self.qkv_opreact(x)
-            q, k, v, o_preact = torch.tensor_split(
-                qkv_opreact,
-                (
-                    self.qk_dim,
-                    2 * self.qk_dim,
-                    2 * self.qk_dim + self.v_dim,
-                ),
-                dim=-1,
-            )
+        # Reshape all tensors consistently
+        q = q.view(B, S, self.config.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, S, self.config.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, S, self.config.num_heads, self.head_dim).transpose(1, 2)
 
-            if_preact = soft_cap(
-                self.ifgate_preact(x), cap_value=self.config.gate_soft_cap
-            )
-            i_preact, f_preact = torch.tensor_split(
-                if_preact, (self.config.num_heads,), dim=-1
-            )
+        i_preact = i_preact.view(B, S, -1).transpose(1, 2)
+        f_preact = f_preact.view(B, S, -1).transpose(1, 2)
 
-        q = q.reshape(B, S, self.config.num_heads, -1).transpose(1, 2)
-        k = k.reshape(B, S, self.config.num_heads, -1).transpose(1, 2)
-        v = v.reshape(B, S, self.config.num_heads, -1).transpose(1, 2)
-        i_preact = i_preact.transpose(1, 2)
-        f_preact = f_preact.transpose(1, 2)
         if state is None:
             c_initial, n_initial, m_initial = None, None, None
         else:
@@ -433,6 +448,7 @@ class mLSTMLayer(nn.Module):
             n_initial=n_initial,
             m_initial=m_initial,
         )
+        print(f"[DEBUG] mLSTMLayer: output h shape: {h.shape}")
         expected_h_shape = (
             B,
             self.config.num_heads,
@@ -457,13 +473,6 @@ class mLSTMBlock(nn.Module):
     def __init__(self, config: xLSTMLargeConfig):
         super().__init__()
         self.config = config
-        self.norm_mlstm = RMSNorm(
-            num_features=config.embedding_dim,
-            eps=config.norm_eps,
-            use_weight=True,
-            use_bias=config.use_bias,
-            force_float32_reductions=config.norm_reduction_force_float32,
-        )
         self.mlstm_layer = mLSTMLayer(
             mLSTMLayerConfig(
                 embedding_dim=config.embedding_dim,
@@ -488,24 +497,58 @@ class mLSTMBlock(nn.Module):
                 ),
             )
         )
-        self.norm_ffn = RMSNorm(
-            num_features=config.embedding_dim,
-            eps=config.norm_eps,
-            use_weight=True,
-            use_bias=config.use_bias,
-            force_float32_reductions=config.norm_reduction_force_float32,
-        )
         self.ffn = FeedForward(config)
+
+    def init_state(self, batch_size: int) -> mLSTMLayerStateType:
+        """Initialize the LSTM state."""
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+
+        # Initialize the three state tensors (c, n, m) with zeros
+        # Shapes should match the expected LSTM state dimensions
+        c = torch.zeros(
+            batch_size, self.config.num_heads, 1, dtype=dtype, device=device
+        )
+        n = torch.zeros(
+            batch_size, self.config.num_heads, 1, dtype=dtype, device=device
+        )
+        m = torch.zeros(
+            batch_size,
+            self.config.num_heads,
+            1,
+            self.config.embedding_dim // self.config.num_heads,
+            dtype=dtype,
+            device=device,
+        )
+
+        return (c, n, m)
 
     def forward(
         self, x: torch.Tensor, state: mLSTMStateType | None = None
     ) -> tuple[torch.Tensor, mLSTMStateType]:
-        x_mlstm = self.norm_mlstm(x)
-        x_mlstm, state = self.mlstm_layer(x_mlstm, state)
-        x = x + x_mlstm
+        """Forward pass of the mLSTM block.
 
-        x_ffn = self.norm_ffn(x)
-        x_ffn = self.ffn(x_ffn)
-        x = x + x_ffn
+        Args:
+            x: Input tensor of shape [batch_size, seq_len, embedding_dim]
+            state: Optional state tuple (c, n, m) for the LSTM
 
-        return x, state
+        Returns:
+            tuple of:
+                output tensor of shape [batch_size, seq_len, embedding_dim]
+                new state tuple (c, n, m)
+        """
+        # Skip connection
+        residual = x
+
+        # mLSTM layer
+        mlstm_out, new_state = self.mlstm_layer(x, state)
+
+        # Add residual connection
+        x = residual + mlstm_out
+
+        # FFN with residual
+        ffn_residual = x
+        x = self.ffn(x)
+        x = x + ffn_residual
+
+        return x, new_state

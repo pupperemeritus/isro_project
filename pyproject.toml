@@ -36,6 +36,7 @@ jax = {version = "0.5.0", extras = ["cuda"]}
 jaxlib = "0.5.0"
 optax = "^0.2.4"
 mlstm-kernels = "^1.0.3"
+xlstm = "^2.0.3"
 
 
 [build-system]
